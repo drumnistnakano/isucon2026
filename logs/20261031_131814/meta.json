@@ -1,0 +1,19 @@
+{
+  "dir": "20261031_131814",
+  "fetched_at": "2026-10-31 13:18:14",
+  "hosts": [
+    "america1",
+    "asia1",
+    "asia2",
+    "europe1"
+  ],
+  "commits": {
+    "asia1": "b3437794c1d0aabb4fbc6bfcc1e0c392a9879bc8",
+    "europe1": "b3437794c1d0aabb4fbc6bfcc1e0c392a9879bc8",
+    "america1": "b3437794c1d0aabb4fbc6bfcc1e0c392a9879bc8"
+  },
+  "bench_window_utc": {
+    "start": "2026-10-31 04:13:50",
+    "end": "2026-10-31 04:16:05"
+  }
+}
