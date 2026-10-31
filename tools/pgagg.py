@@ -1,7 +1,8 @@
 """PostgreSQL の log_min_duration_statement=0 のログをクエリごとに集計する。
 
-usage: python -I pgagg.py <logfile> <since "YYYY-MM-DD HH:MM:SS"> [top]
+usage: python -I pgagg.py <logfile[.gz]> <since "YYYY-MM-DD HH:MM:SS"> [top]
 """
+import gzip
 import re
 import sys
 from collections import defaultdict
@@ -57,7 +58,8 @@ def flush(entry):
         st[2] = max(st[2], ms)
 
 
-with open(path, encoding="utf-8", errors="replace") as f:
+opener = gzip.open if path.endswith(".gz") else open
+with opener(path, "rt", encoding="utf-8", errors="replace") as f:
     for line in f:
         line = line.rstrip("\n")
         h = head_re.match(line)

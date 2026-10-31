@@ -3,12 +3,19 @@
 `bak.yml` で 13:18 (JST) に取得したログのうち、最後のベンチ (asia1 で `POST /api/initialize` が来た 04:13:50 以降) を集計した。
 
 - デプロイ済みコミット: `b343779` (pg_stat_statements / 全クエリログ有効)
-- 生ログは `.gitignore` 済み (取得した人の手元の `logs/20261031_131814/<ホスト名>/` にある)
+- 生ログは `.gitignore` 済み (取得した人の手元の `logs/20261031_131814/<ホスト名>/` にある)。gzip したものを下記に置く
 
 | ファイル | 内容 |
 |---|---|
 | [alp.txt](alp.txt) | nginx アクセスログ (アプリ3台合計 + ホスト別)。`alp ltsv --sort sum -r` |
-| [slow-queries.txt](slow-queries.txt) | PostgreSQL のクエリログを正規化して集計。`python3 tools/pgagg.py <log> "2026-10-31 04:13:50" 25` |
+| [slow-queries.txt](slow-queries.txt) | PostgreSQL のクエリログを正規化して集計。`python3 tools/pgagg.py asia2-postgresql.log.gz "2026-10-31 04:13:50" 25` |
+| `{asia1,europe1,america1}-access.log.gz` | nginx アクセスログ (取得時点の全量。ベンチ以前の行や LTSV 化前の行も含む) |
+| `asia2-postgresql.log.gz` | PostgreSQL のログから `DETAIL: parameters:` 行を除いたもの (元 389MB のうち 350MB が画像データなどのパラメータ値で、トークンのハッシュも含むため) |
+
+```bash
+# 再集計の例
+zcat asia1-access.log.gz | grep '^time:' | alp ltsv --sort sum -r
+```
 
 ## 目立つもの
 
