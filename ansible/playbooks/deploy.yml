@@ -293,6 +293,34 @@
         mode: "0644"
       when: not dry_run
 
+    # systemd の既定の soft limit は 1024。SSE が接続を保持するので両サービスで上げる。
+    # nginx 側は nginx.conf の worker_rlimit_nofile でも同じ値を指定している。
+    - name: アプリのファイルディスクリプタ上限を上げる
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/isureal-python.service.d/limit-nofile.conf
+        content: |
+          [Service]
+          LimitNOFILE=65536
+        mode: "0644"
+      become: true
+      when: not dry_run
+
+    - name: nginx のファイルディスクリプタ上限を上げる
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/nginx.service.d/limit-nofile.conf
+        content: |
+          [Service]
+          LimitNOFILE=65536
+        mode: "0644"
+      become: true
+      when: not dry_run
+
+    - name: systemd のユニット設定を再読み込み
+      ansible.builtin.systemd:
+        daemon_reload: true
+      become: true
+      when: not dry_run
+
     - name: isureal-python を再起動
       ansible.builtin.systemd:
         name: isureal-python
@@ -321,6 +349,14 @@
       register: nginx_svc
       changed_when: false
       failed_when: nginx_svc.stdout | trim != "active"
+      when: not dry_run
+
+    - name: ファイルディスクリプタ上限が反映されているか確認
+      ansible.builtin.command:
+        cmd: systemctl show -p LimitNOFILE isureal-python nginx
+      register: nofile_limit
+      changed_when: false
+      failed_when: nofile_limit.stdout_lines | select('ne', 'LimitNOFILE=65536') | list | length > 0
       when: not dry_run
 
     - name: アプリが応答するか確認（404 が返ればプロセスは生きている）
