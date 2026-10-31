@@ -152,22 +152,34 @@ DB 設定を先に反映し、そのあとアプリを再起動する（DB 再�
 
 ## 6. DB 変更（スキーマ・インデックス）
 
-**`POST /api/initialize` ではスキーマは作られない。** `sql/init.sh` が流す `reset.sql` は
-TRUNCATE と初期データ復元だけで、テーブル定義・インデックスは触らない
-（`users_username` の一意インデックスだけは `reset.sql` の末尾で `IF NOT EXISTS` 付きで作る）。
+**`sql/` 配下は置いてあるだけでは適用されない。** 実行されるのは `reset.sql` だけ。
 
-設定ファイル（`postgresql.conf`）は `deploy.yml` が毎回配布して PostgreSQL を再起動する。
-一方、**スキーマやインデックスの変更は配布されない**。インデックス追加やテーブル変更を含む
-ブランチでは、`sql/001-schema.sql` を直したうえで `playbooks/db-apply.yml` を asia2 に対して流す。
+| ファイル | 誰が実行するか | タイミング |
+|---|---|---|
+| `reset.sql` | `init.sh` ← `initialize.py` ← `POST /api/initialize` | ベンチ開始時（毎回） |
+| `001-schema.sql` | なし（初期構築用。リポジトリ内に実行箇所が無い） | 手作業 |
+| `003-initial-snapshot.sql` | なし | 手作業 |
+
+`deploy.yml` は `webapp/sql/` を rsync で配るだけで、psql は叩かない
+（`postgresql.conf` だけは配布して PostgreSQL を再起動する）。
+
+稼働中の DB に DDL を効かせたいときは、**次の2箇所に同じ定義を書く**。
+
+1. `ansible/vars/pg_schema.yml` の `pg_schema_ddl` … `deploy.yml` がデプロイのたびに流す
+2. `webapp/sql/reset.sql` … `/api/initialize` のたびに流れる（保険）
+3. `webapp/sql/001-schema.sql` … 初期構築用の正（実行はされない）
+
+どれも `IF NOT EXISTS` を付けて、何度流しても壊れないようにする。
+デプロイ時点で作っておくのは、`/api/initialize` より先にリクエストが来ても困らないため
+（例: `ON CONFLICT (username)` は一意インデックスが無いとエラーになる）。
+
+単体で適用したいときだけ `playbooks/db-apply.yml` を使う。
 
 ```bash
 cd ansible
 ansible-playbook playbooks/db-apply.yml            # 何度実行してもよい
-ansible-playbook playbooks/db-apply.yml --check    # 差分の確認だけ
+ansible-playbook playbooks/db-apply.yml --check    # 変更点の確認だけ
 ```
-
-適用する DDL は `db-apply.yml` の `pg_schema_ddl` に並べる。**コードより先に流すこと**
-（`ON CONFLICT (username)` は一意インデックスが無いとエラーになる）。
 
 ## 7. デプロイ後の確認（ベンチ前チェック）
 

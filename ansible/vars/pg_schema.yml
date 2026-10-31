@@ -1,0 +1,13 @@
+---
+# 稼働中の DB に足す DDL。
+#
+# ここに並べたものが、deploy.yml（デプロイのたび）と db-apply.yml（単体実行）で流れる。
+# 001-schema.sql は初期構築用で、リポジトリ内のどこからも実行されない。
+# 稼働中の DB に反映したい DDL はここにも書くこと。
+#
+# 何度流しても壊れないように、必ず IF NOT EXISTS を付ける。
+pg_db: isureal
+
+pg_schema_ddl:
+  - name: users_username
+    sql: CREATE UNIQUE INDEX IF NOT EXISTS users_username ON users(username)

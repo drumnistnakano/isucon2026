@@ -1,12 +1,12 @@
 ---
-# スキーマ / インデックスの変更を DB 1台（asia2）に適用する。
+# スキーマ / インデックスの変更を DB 1台（asia2）に単体で適用する。
 #
-# `POST /api/initialize` は reset.sql を流すだけで、テーブル定義とインデックスは作らない。
-# そのため、001-schema.sql に足したインデックスはこのプレイブックで明示的に適用する。
+# 通常は deploy.yml が同じ DDL（vars/pg_schema.yml）を流すので、こちらを単体で使う場面は
+# 「コードはそのまま、インデックスだけ先に当てたい」「デプロイせずに確認したい」程度。
 #
 # 使い方（必ず ansible/ ディレクトリで実行する）:
 #   ansible-playbook playbooks/db-apply.yml
-#   ansible-playbook playbooks/db-apply.yml --check    # 差分があるかだけ見る
+#   ansible-playbook playbooks/db-apply.yml --check    # 変更点だけ見る
 #
 # 何度実行してもよい（IF NOT EXISTS で作る）。
 
@@ -14,12 +14,8 @@
   hosts: db
   gather_facts: false
 
-  vars:
-    pg_db: isureal
-    # 001-schema.sql に足したインデックスと同じ定義を並べる
-    pg_schema_ddl:
-      - name: users_username
-        sql: CREATE UNIQUE INDEX IF NOT EXISTS users_username ON users(username)
+  vars_files:
+    - ../vars/pg_schema.yml
 
   tasks:
     - name: 適用予定を表示
