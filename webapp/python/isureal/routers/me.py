@@ -2,18 +2,19 @@ import io
 import uuid
 import zipfile
 from http import HTTPStatus
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import TypeAdapter
 
 from ..auth import CurrentSession, RegionalSession
 from ..binding import RequestBody, json_body
-from ..db import DB, execute, fetch_all, fetch_one
+from ..db import DB, execute, fetch_all, fetch_one, from_row
 from ..errors import APIError, NoRowsError
+from ..image_cache import ImageCache
 from ..jpeg import jpeg_failure
 from ..models.post import POST_COLUMNS, Post
-from ..models.user import get_user, valid_region, valid_user_text
+from ..models.user import User, get_user, user_columns, valid_region, valid_user_text
 from ..schemas import ExportPostResponse, MeResponse
 
 router = APIRouter(prefix="/api/me")
@@ -166,30 +167,62 @@ _export_manifest = TypeAdapter(list[ExportPostResponse])
 
 
 @router.get("/export")
-async def export_posts(db: DB, session: RegionalSession) -> Response:
-    author = await get_user(db, session.user_id)
-    if author is None:
+async def export_posts(db: DB, session: RegionalSession, request: Request) -> Response:
+    cache: ImageCache = request.app.state.image_cache
+    # 投稿者と投稿一覧は独立なので1往復にまとめる（リージョンをまたぐと1往復が重い）
+    async with db.pipeline():
+        author_cursor = await db.execute(
+            f"SELECT {user_columns()} FROM users WHERE id = %(id)s AND status = 'active'",
+            {"id": session.user_id},
+        )
+        posts_cursor = await db.execute(
+            f"""
+            SELECT {POST_COLUMNS}
+            FROM posts p
+            JOIN posting_windows w ON w.id = p.posting_window_id
+            WHERE p.author_id = %(user_id)s AND p.deleted_at IS NULL
+            ORDER BY p.posted_at, p.id
+            """,
+            {"user_id": session.user_id},
+        )
+    author_row = await author_cursor.fetchone()
+    if author_row is None:
         raise NoRowsError
-    rows = await fetch_all(
-        db,
-        f"""
-        SELECT {POST_COLUMNS}, i.data AS image_data
-        FROM posts p
-        JOIN posting_windows w ON w.id = p.posting_window_id
-        JOIN image_objects i ON i.id = p.image_id
-        WHERE p.author_id = %(user_id)s AND p.deleted_at IS NULL
-        ORDER BY p.posted_at, p.id
-        """,
-        {"user_id": session.user_id},
-    )
+    author = from_row(User, author_row)
+    rows = await posts_cursor.fetchall()
+
+    # 画像は DB から運ばず、まずローカルキャッシュを見る。
+    # 無い分だけまとめて1回で取り、次回以降のためにキャッシュへ入れる。
+    images: dict[str, bytes | None] = {}
+    missing: list[str] = []
+    for row in rows:
+        image_id = row["image_id"]
+        if image_id in images:
+            continue
+        images[image_id] = cache.get(image_id)
+        if images[image_id] is None:
+            missing.append(image_id)
+    if missing:
+        for row in await fetch_all(
+            db,
+            "SELECT id, data FROM image_objects WHERE id = ANY(%(ids)s)",
+            {"ids": missing},
+        ):
+            images[row["id"]] = row["data"]
+            cache.put(row["id"], row["data"])
+
+    # 画像が見つからない投稿は従来どおり出力しない
+    included: list[tuple[Any, bytes]] = []
+    for row in rows:
+        data = images.get(row["image_id"])
+        if data is not None:
+            included.append((row, data))
     body = io.BytesIO()
     items: list[ExportPostResponse] = []
     with zipfile.ZipFile(body, "w") as archive:
-        for number, row in enumerate(rows, start=1):
+        for number, (row, image_data) in enumerate(included, start=1):
             image_path = f"images/{number:06d}.jpg"
-            archive.writestr(
-                image_path, row["image_data"], compress_type=zipfile.ZIP_STORED
-            )
+            archive.writestr(image_path, image_data, compress_type=zipfile.ZIP_STORED)
             items.append(
                 ExportPostResponse.of(Post.from_row(row), author, image_path=image_path)
             )
