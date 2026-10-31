@@ -9,6 +9,7 @@ from fastapi import APIRouter, Request, Response
 
 from ..db import DB, fetch_one
 from ..errors import APIError
+from ..image_cache import ImageCache
 from ..image_signature import encode_signature, image_signature, image_signing_key
 
 router = APIRouter(prefix="/api/images")
@@ -47,27 +48,17 @@ def parse_signed_query(raw_query: str) -> tuple[int, bytes]:
 @router.get("/{image_id}")
 async def get_image(db: DB, image_id: str, request: Request) -> Response:
     exp, sig = parse_signed_query(request.url.query)
-    owner = await fetch_one(
-        db,
-        """
-        SELECT u.secret_key_hash
-        FROM image_objects i JOIN users u ON u.id = i.owner_user_id
-        WHERE i.id = %(id)s AND u.status = 'active'
-        """,
-        {"id": image_id},
-    )
-    if owner is None:
-        raise image_forbidden()
-    key = image_signing_key(owner["secret_key_hash"])
-    if not hmac.compare_digest(sig, image_signature(key, image_id, exp)):
-        request.state.abuse = "invalid_signature"
-        raise image_forbidden()
 
-    # 削除状態を毎回確認する。即時反映も5秒以内の許容範囲に含まれる。
+    cache: ImageCache = request.app.state.image_cache
+    cached = cache.get(image_id)
+    # キャッシュに無ければ data も同時に取る（1往復で済ませる）
+    columns = "u.secret_key_hash, i.media_type"
+    if cached is None:
+        columns += ", i.data"
     image = await fetch_one(
         db,
-        """
-        SELECT i.data, i.media_type
+        f"""
+        SELECT {columns}
         FROM image_objects i JOIN users u ON u.id = i.owner_user_id AND u.status = 'active'
         WHERE i.id = %(id)s AND (
           u.profile_image_id = i.id
@@ -85,6 +76,17 @@ async def get_image(db: DB, image_id: str, request: Request) -> Response:
         """,
         {"id": image_id},
     )
-    if image is None or exp <= time.time():
+    if image is None:
         raise image_forbidden()
-    return Response(image["data"], media_type=image["media_type"], headers=NO_STORE)
+    key = image_signing_key(image["secret_key_hash"])
+    if not hmac.compare_digest(sig, image_signature(key, image_id, exp)):
+        request.state.abuse = "invalid_signature"
+        raise image_forbidden()
+    if exp <= time.time():
+        raise image_forbidden()
+
+    if cached is None:
+        # 画像の中身は不変なので、取得できたものをそのまま保存してよい
+        cached = image["data"]
+        cache.put(image_id, cached)
+    return Response(cached, media_type=image["media_type"], headers=NO_STORE)

@@ -20,6 +20,7 @@ class Config:
     db_name: str
     db_pool_size: int
     log_level: str
+    image_cache_dir: str
 
     @classmethod
     def from_env(cls) -> Self:
@@ -32,6 +33,7 @@ class Config:
             db_name=_env("ISUREAL_DB_NAME", "isureal"),
             db_pool_size=int(_env("ISUREAL_DB_POOL_SIZE", "7")),
             log_level=_env("ISUREAL_LOG_LEVEL", "debug"),
+            image_cache_dir=_env("ISUREAL_IMAGE_CACHE_DIR", "/home/isucon/cache/images"),
         )
 
     @property
