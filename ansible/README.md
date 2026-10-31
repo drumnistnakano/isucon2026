@@ -298,6 +298,9 @@ main を配るだけなので、戻す操作もデプロイと同じ1コマン�
   忘れると何も変更せずに止まる
 - `inventory.ini` の IP が古いと別スタックへ配ってしまう。再構築したら `inventory.ini` を更新する
 - `--delete` を使うので、除外指定（`.venv/` など）を消さないこと
+- `etc/nginx/nginx.conf` は `gzip_proxied any` + `gzip_types application/json` で API の JSON も圧縮する
+  （既定の `gzip_proxied off` では upstream のレスポンスは圧縮されない）。画像は `gzip_types` に無いので対象外。
+  クライアントが `Accept-Encoding: gzip` を送らない場合は圧縮されない
 - サーバ側で直接ファイルを編集しない。次のデプロイで上書きされる
   - `/etc/nginx/nginx.conf` → `~/etc/nginx/nginx.conf` への symlink
   - `/etc/postgresql/16/main/postgresql.conf` → `~/etc/postgresql/16/main/postgresql.conf` への symlink
