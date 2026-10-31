@@ -16,6 +16,7 @@ from .errors import APIError
 from .image_cache import ImageCache
 from .ip_ban import IPBanMiddleware
 from .models.user import valid_region
+from .notification_hub import NotificationHub
 from .routers import (
     admin,
     auth,
@@ -75,7 +76,13 @@ def create_app(config: Config | None = None) -> FastAPI:
             app.state.config = config
             app.state.pool = pool
             app.state.image_cache = ImageCache(config.image_cache_dir)
-            yield
+            hub = NotificationHub(config.database_dsn)
+            hub.start()
+            app.state.notification_hub = hub
+            try:
+                yield
+            finally:
+                await hub.stop()
 
     app = FastAPI(lifespan=lifespan, redirect_slashes=False, openapi_url=None)
     app.add_exception_handler(APIError, api_error_handler)

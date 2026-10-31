@@ -10,12 +10,14 @@ from fastapi.responses import StreamingResponse
 from ..auth import RegionalSession
 from ..db import DB, Pool, fetch_one, fetch_value
 from ..models.session import Session
+from ..notification_hub import NotificationHub, region_key, user_key
 from ..schemas import NotificationResponse
 
 router = APIRouter(prefix="/api/notifications")
 logger = logging.getLogger(__name__)
 
-POLL_INTERVAL = 0.2
+# LISTEN の接続が切れていても届くように、NOTIFY が来なくてもこの間隔で DB を確認する
+FALLBACK_INTERVAL = 2.0
 NEXT_NOTIFICATION_QUERY = """
 SELECT u.region AS user_region, n.*
 FROM users u LEFT JOIN LATERAL (
@@ -30,12 +32,28 @@ WHERE u.id = %(user_id)s AND u.status = 'active'
 HEARTBEAT_INTERVAL = 10.0
 
 
+async def wait_any(events: tuple[asyncio.Event, ...], timeout: float) -> None:
+    waiters = [asyncio.ensure_future(event.wait()) for event in events]
+    try:
+        await asyncio.wait(
+            waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        for waiter in waiters:
+            waiter.cancel()
+
+
 async def notification_events(
-    pool: Pool, session: Session, connected_at: datetime
+    pool: Pool, hub: NotificationHub, session: Session, connected_at: datetime
 ) -> AsyncIterator[bytes]:
     """接続後に届いた通知を 1 件送って終わる"""
     last_heartbeat = time.monotonic()
     while True:
+        # DB を見る前に受け取っておけば、見た直後に来た NOTIFY も取りこぼさない
+        wakeups = (
+            hub.event(region_key(session.region)),
+            hub.event(user_key(session.user_id)),
+        )
         try:
             # 1往復で届け先の確認と通知の取得を済ませる
             async with pool.connection() as db:
@@ -64,7 +82,8 @@ async def notification_events(
             # SSE のコメント行。クライアントは無視する
             yield b": keepalive\n\n"
             last_heartbeat = now
-        await asyncio.sleep(POLL_INTERVAL)
+        until_heartbeat = HEARTBEAT_INTERVAL - (time.monotonic() - last_heartbeat)
+        await wait_any(wakeups, max(0.0, min(FALLBACK_INTERVAL, until_heartbeat)))
 
 
 @router.get("")
@@ -73,7 +92,12 @@ async def get_notifications(
 ) -> StreamingResponse:
     connected_at: datetime = await fetch_value(db, "SELECT clock_timestamp()")
     return StreamingResponse(
-        notification_events(request.app.state.pool, session, connected_at),
+        notification_events(
+            request.app.state.pool,
+            request.app.state.notification_hub,
+            session,
+            connected_at,
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
