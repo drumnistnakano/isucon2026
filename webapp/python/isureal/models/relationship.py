@@ -6,9 +6,17 @@ from datetime import datetime
 from http import HTTPStatus
 from typing import Any
 
-from ..db import Connection, execute, fetch_all, fetch_one, fetch_value, from_row
+from ..db import (
+    Connection,
+    execute,
+    fetch_all,
+    fetch_one,
+    fetch_value,
+    from_row,
+    pipeline_transaction,
+)
 from ..errors import APIError
-from .user import lock_user
+from .user import LOCK_ACTIVE_USER_QUERY
 
 
 @dataclass(slots=True)
@@ -35,29 +43,37 @@ async def get_friend_request(db: Connection, request_id: str) -> FriendRequest |
 
 @asynccontextmanager
 async def relationship_transaction(
-    db: Connection, actor: str, target: str
+    db: Connection, actor: str, target: str, *, pipeline: bool = False
 ) -> AsyncIterator[None]:
-    """2 人のユーザーを ID 順にロックしたトランザクションを開始する"""
+    """2 人のユーザーを ID 順にロックしたトランザクションを開始する
+
+    pipeline=True の間は execute() の戻り値（変更行数）を使えない
+    """
     if actor == target or not target:
         raise APIError(HTTPStatus.BAD_REQUEST, "invalid_relationship")
-    async with db.transaction():
-        for user_id in sorted((actor, target)):
-            if not await lock_user(db, user_id, active_only=True):
+    async with pipeline_transaction(db) if pipeline else db.transaction():
+        locks = [
+            await db.execute(LOCK_ACTIVE_USER_QUERY, {"user_id": user_id})
+            for user_id in sorted((actor, target))
+        ]
+        for lock in locks:
+            if await lock.fetchone() is None:
                 raise APIError(HTTPStatus.NOT_FOUND, "relationship_not_found")
         yield
 
 
+IS_BLOCKED_QUERY = """
+SELECT EXISTS(
+  SELECT 1 FROM block_relations
+  WHERE (blocker_id = %(actor)s AND blocked_id = %(target)s)
+     OR (blocker_id = %(target)s AND blocked_id = %(actor)s)
+) AS blocked
+"""
+
+
 async def is_blocked(db: Connection, actor: str, target: str) -> bool:
     blocked: bool = await fetch_value(
-        db,
-        """
-        SELECT EXISTS(
-          SELECT 1 FROM block_relations
-          WHERE (blocker_id = %(actor)s AND blocked_id = %(target)s)
-             OR (blocker_id = %(target)s AND blocked_id = %(actor)s)
-        )
-        """,
-        {"actor": actor, "target": target},
+        db, IS_BLOCKED_QUERY, {"actor": actor, "target": target}
     )
     return blocked
 

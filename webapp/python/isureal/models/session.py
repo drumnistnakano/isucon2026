@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from ..db import Connection, execute, fetch_one
 from ..errors import NoRowsError
-from .user import lock_user
+from .user import LOCK_ACTIVE_USER_QUERY, lock_user
 
 
 def hash_token(token: str) -> str:
@@ -41,8 +41,7 @@ async def find_session(db: Connection, token: str) -> Session | None:
 async def create_login_session(db: Connection, user_id: str) -> str:
     """ユーザーのセッションを作り直してトークンを返す。トランザクション内で呼ぶこと"""
     token = str(uuid.uuid4())
-    if not await lock_user(db, user_id, active_only=True):
-        raise NoRowsError
+    lock = await db.execute(LOCK_ACTIVE_USER_QUERY, {"user_id": user_id})
     await execute(
         db,
         """
@@ -57,6 +56,8 @@ async def create_login_session(db: Connection, user_id: str) -> str:
         "INSERT INTO login_sessions (id, user_id, token_hash) VALUES (%(id)s, %(user_id)s, %(token_hash)s)",
         {"id": str(uuid.uuid4()), "user_id": user_id, "token_hash": hash_token(token)},
     )
+    if await lock.fetchone() is None:
+        raise NoRowsError
     return token
 
 

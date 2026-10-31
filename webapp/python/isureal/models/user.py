@@ -77,6 +77,9 @@ async def get_user(db: Connection, user_id: str) -> User | None:
 
 
 LOCK_USER_QUERY = "SELECT id FROM users WHERE id = %(user_id)s FOR NO KEY UPDATE"
+LOCK_ACTIVE_USER_QUERY = """
+SELECT id FROM users WHERE id = %(user_id)s AND status = 'active' FOR NO KEY UPDATE
+"""
 
 
 async def lock_user(db: Connection, user_id: str, *, active_only: bool = False) -> bool:
