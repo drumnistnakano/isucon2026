@@ -55,11 +55,17 @@ async def get_image(db: DB, image_id: str, request: Request) -> Response:
     columns = "u.secret_key_hash, i.media_type"
     if cached is None:
         columns += ", i.data"
+    # 普通に JOIN すると、36 パーティションから行が来る見積もりになり、users を
+    # Seq Scan してハッシュ結合する（約 3ms）。LIMIT 付きの LATERAL は展開されないので、
+    # 所有者を主キーで 1 件だけ引く
     image = await fetch_one(
         db,
         f"""
         SELECT {columns}
-        FROM image_objects i JOIN users u ON u.id = i.owner_user_id AND u.status = 'active'
+        FROM image_objects i CROSS JOIN LATERAL (
+          SELECT id, secret_key_hash, profile_image_id FROM users
+          WHERE id = i.owner_user_id AND status = 'active' LIMIT 1
+        ) u
         WHERE i.id = %(id)s AND (
           u.profile_image_id = i.id
           OR EXISTS (
