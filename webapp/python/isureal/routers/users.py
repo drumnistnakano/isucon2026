@@ -30,22 +30,27 @@ async def search_users(
         raise APIError(HTTPStatus.BAD_REQUEST, "invalid_relationship")
     if (before_username == "") != (before_id == ""):
         raise APIError(HTTPStatus.BAD_REQUEST, "invalid_pagination")
+    query = normalize_search_text(q)
     rows = await fetch_all(
         db,
         f"""
         SELECT {user_columns()} FROM users
         WHERE status = 'active' AND id <> %(viewer)s
           AND (%(before_username)s = '' OR (username, id) > (%(before_username)s, %(before_id)s))
+          AND (
+            strpos(lower(normalize(username, NFC)), %(query)s) > 0
+            OR strpos(lower(normalize(display_name, NFC)), %(query)s) > 0
+          )
         ORDER BY username, id
         """,
         {
             "viewer": session.user_id,
             "before_username": before_username,
             "before_id": before_id,
+            "query": query,
         },
     )
     blocked = await get_blocked_user_ids(db, session.user_id)
-    query = normalize_search_text(q)
     items: list[UserResponse] = []
     for row in rows:
         user = from_row(User, row)
