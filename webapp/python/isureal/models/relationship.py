@@ -16,7 +16,7 @@ from ..db import (
     pipeline_transaction,
 )
 from ..errors import APIError
-from .user import LOCK_ACTIVE_USER_QUERY
+from .user import LOCK_ACTIVE_USERS_QUERY
 
 
 @dataclass(slots=True)
@@ -52,23 +52,24 @@ async def relationship_transaction(
     if actor == target or not target:
         raise APIError(HTTPStatus.BAD_REQUEST, "invalid_relationship")
     async with pipeline_transaction(db) if pipeline else db.transaction():
-        locks = [
-            await db.execute(LOCK_ACTIVE_USER_QUERY, {"user_id": user_id})
-            for user_id in sorted((actor, target))
-        ]
-        for lock in locks:
-            if await lock.fetchone() is None:
-                raise APIError(HTTPStatus.NOT_FOUND, "relationship_not_found")
+        # pipeline でない呼び出し元でも 1 往復で 2 人をロックできるよう 1 文にする
+        lock = await db.execute(
+            LOCK_ACTIVE_USERS_QUERY, {"user_ids": sorted((actor, target))}
+        )
+        if len(await lock.fetchall()) != 2:
+            raise APIError(HTTPStatus.NOT_FOUND, "relationship_not_found")
         yield
 
 
-IS_BLOCKED_QUERY = """
-SELECT EXISTS(
+# 2 人の間にどちら向きかのブロックがあるか。%(actor)s と %(target)s を使う
+BLOCKED_PAIR_CONDITION = """
+EXISTS(
   SELECT 1 FROM block_relations
   WHERE (blocker_id = %(actor)s AND blocked_id = %(target)s)
      OR (blocker_id = %(target)s AND blocked_id = %(actor)s)
-) AS blocked
+)
 """
+IS_BLOCKED_QUERY = f"SELECT {BLOCKED_PAIR_CONDITION} AS blocked"
 
 
 async def is_blocked(db: Connection, actor: str, target: str) -> bool:
