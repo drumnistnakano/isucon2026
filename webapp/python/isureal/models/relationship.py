@@ -16,7 +16,6 @@ from ..db import (
     pipeline_transaction,
 )
 from ..errors import APIError
-from .user import LOCK_ACTIVE_USERS_QUERY
 
 
 @dataclass(slots=True)
@@ -41,20 +40,35 @@ async def get_friend_request(db: Connection, request_id: str) -> FriendRequest |
     return from_row(FriendRequest, row) if row else None
 
 
+# 守りたいもの（2 人の間の申請・フレンド・フォロー・ブロック）は 2 人の組み合わせで
+# 完結するので、組み合わせごとの advisory lock で直列化する。ユーザーの行は退会と
+# ぶつかればよいので共有ロックにし、人気ユーザーへの別々の操作が待ち合わないようにする。
+# MATERIALIZED にして、行をロックする前に advisory lock を取る
+LOCK_RELATIONSHIP_QUERY = """
+WITH pair_lock AS MATERIALIZED (
+  SELECT pg_advisory_xact_lock(hashtextextended(%(pair)s, 0))
+)
+SELECT u.id FROM users u, pair_lock
+WHERE u.id = ANY(%(user_ids)s) AND u.status = 'active'
+ORDER BY u.id FOR SHARE OF u
+"""
+
+
 @asynccontextmanager
 async def relationship_transaction(
     db: Connection, actor: str, target: str, *, pipeline: bool = False
 ) -> AsyncIterator[None]:
-    """2 人のユーザーを ID 順にロックしたトランザクションを開始する
+    """2 人の組み合わせをロックし、2 人が active な間に限るトランザクションを開始する
 
     pipeline=True の間は execute() の戻り値（変更行数）を使えない
     """
     if actor == target or not target:
         raise APIError(HTTPStatus.BAD_REQUEST, "invalid_relationship")
+    low, high = sorted((actor, target))
     async with pipeline_transaction(db) if pipeline else db.transaction():
-        # pipeline でない呼び出し元でも 1 往復で 2 人をロックできるよう 1 文にする
         lock = await db.execute(
-            LOCK_ACTIVE_USERS_QUERY, {"user_ids": sorted((actor, target))}
+            LOCK_RELATIONSHIP_QUERY,
+            {"pair": f"relationship:{low}:{high}", "user_ids": [low, high]},
         )
         if len(await lock.fetchall()) != 2:
             raise APIError(HTTPStatus.NOT_FOUND, "relationship_not_found")
