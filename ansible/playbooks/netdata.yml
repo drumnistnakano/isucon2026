@@ -1,0 +1,143 @@
+---
+# 全サーバ（アプリ3台 + DB 1台）に netdata を入れる。
+#
+# 使い方（必ず ansible/ ディレクトリで実行する）:
+#   ansible-playbook playbooks/netdata.yml                   # 4台すべて
+#   ansible-playbook playbooks/netdata.yml --limit asia2     # 1台だけ
+#
+# 入れ方（asia1 と同じ）:
+#   Netdata 公式 apt リポジトリ（edge チャンネル）のネイティブパッケージ。
+#   netdata-repo-edge の .deb でリポジトリと鍵を入れ、apt install netdata する。
+#   既に入っていればダウンロードもインストールもしない（何度実行してもよい）。
+#
+# 確認:
+#   systemctl is-active netdata         -> active
+#   ss -ltn | grep 19999                -> 0.0.0.0:19999 で待ち受け
+#   curl -s localhost:19999/api/v1/info -> JSON が返る
+#
+# 注意:
+#   - 自動起動にする。計測前は `sudo systemctl stop netdata` で止める（AGENTS.md）。
+#   - /var/cache/netdata に計測データを書く（初回で十数MB）。ディスク残量に注意。
+#   - netdata-updater.timer は止めておく（競技中に勝手に更新・再起動されないように）。
+
+- name: 全サーバに netdata を入れる
+  hosts: all
+  gather_facts: true
+  become: true
+
+  vars:
+    # asia1 に入っているのと同じ系統（edge = nightly）。noble (24.04) 用の _all.deb。
+    netdata_repo_deb_version: "5-5"
+    netdata_repo_deb_url: >-
+      http://repository.netdata.cloud/repos/repoconfig/ubuntu/noble/netdata-repo-edge_{{ netdata_repo_deb_version }}+ubuntu24.04_all.deb
+    netdata_repo_deb: /tmp/netdata-repo-edge.deb
+    netdata_sources: /etc/apt/sources.list.d/netdata-edge.sources
+
+  tasks:
+    - name: 配布物が noble (Ubuntu 24.04) 用であることを確認
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_release == "noble"
+        fail_msg: >-
+          このプレイブックは Ubuntu 24.04 (noble) 用。
+          {{ inventory_hostname }} は {{ ansible_distribution }} {{ ansible_distribution_release }}。
+
+    - name: 導入状況を確認
+      ansible.builtin.command:
+        cmd: dpkg-query -W -f='${Status} ${Version}' netdata
+      register: nd_pkg
+      changed_when: false
+      failed_when: false
+
+    - name: netdata が未導入か判定
+      ansible.builtin.set_fact:
+        nd_missing: "{{ 'install ok installed' not in nd_pkg.stdout }}"
+
+    - name: apt リポジトリ設定があるか確認
+      ansible.builtin.stat:
+        path: "{{ netdata_sources }}"
+      register: nd_repo
+
+    - name: リポジトリ設定を入れる必要があるか判定
+      ansible.builtin.set_fact:
+        nd_need_repo: "{{ nd_missing and not nd_repo.stat.exists }}"
+
+    - name: リポジトリ設定の deb をダウンロード
+      ansible.builtin.get_url:
+        url: "{{ netdata_repo_deb_url }}"
+        dest: "{{ netdata_repo_deb }}"
+        mode: "0644"
+      when: nd_need_repo
+
+    - name: netdata の apt リポジトリと鍵を入れる
+      ansible.builtin.apt:
+        deb: "{{ netdata_repo_deb }}"
+        state: present
+      when: nd_need_repo
+
+    - name: netdata をインストール
+      ansible.builtin.apt:
+        name: netdata
+        state: present
+        update_cache: true
+      register: nd_install
+      when: nd_missing
+
+    - name: ダウンロードした deb を削除
+      ansible.builtin.file:
+        path: "{{ netdata_repo_deb }}"
+        state: absent
+      when: nd_need_repo
+
+    - name: netdata-updater.timer のユニットがあるか確認
+      ansible.builtin.stat:
+        path: /usr/lib/systemd/system/netdata-updater.timer
+      register: nd_updater
+
+    - name: 自動更新タイマーを止める（競技中に勝手に更新させない）
+      ansible.builtin.systemd:
+        name: netdata-updater.timer
+        enabled: false
+        state: stopped
+      when: nd_updater.stat.exists
+
+    - name: netdata を自動起動にして起動
+      ansible.builtin.systemd:
+        name: netdata
+        enabled: true
+        state: started
+
+    - name: netdata が起動しているか確認
+      ansible.builtin.command:
+        cmd: systemctl is-active netdata
+      register: nd_svc
+      changed_when: false
+      failed_when: nd_svc.stdout | trim != "active"
+
+    - name: 19999 で待ち受けているか確認
+      ansible.builtin.command:
+        cmd: ss -ltn
+      register: nd_listen
+      changed_when: false
+      failed_when: "':19999' not in nd_listen.stdout"
+
+    - name: ローカルの API が応答するか確認
+      ansible.builtin.uri:
+        url: http://127.0.0.1:19999/api/v1/info
+        status_code: 200
+        timeout: 5
+      register: nd_api
+      retries: 10
+      delay: 2
+      until: nd_api.status is defined and nd_api.status == 200
+
+    - name: バージョンを取得
+      ansible.builtin.command:
+        cmd: dpkg-query -W -f='${Version}' netdata
+      register: nd_version
+      changed_when: false
+
+    - name: バージョンを表示
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: netdata {{ nd_version.stdout | trim }}"

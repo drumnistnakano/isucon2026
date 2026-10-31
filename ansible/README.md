@@ -23,6 +23,7 @@ ansible/
   inventory.ini         # サーバの IP（変わったらここを直す）
   playbooks/deploy.yml  # 同期 → 記録 → 再起動 → 検証
   playbooks/bak.yml     # ベンチ前のログ退避・初期化と pg_stat_statements のリセット
+  playbooks/netdata.yml # 全4台に netdata を入れる（デプロイとは独立）
   README.md             # このファイル
 etc/
   nginx/nginx.conf                  # アプリ3台の /etc/nginx/nginx.conf（symlink 先）
@@ -41,6 +42,7 @@ webapp/
 - サーバに `rsync` がある（3.2.7 で確認済み）
 - サーバに `/home/isucon/local/uv/uv` がある（0.13.5 で確認済み）
 - アプリ3台から GitHub のリリースへ HTTPS で取得できる（playbook が alp v1.0.21 を導入する）
+- 全4台から `repository.netdata.cloud` へ HTTP で取得できる（`playbooks/netdata.yml` が使う）
 - ローカルの main が origin/main と一致し、`webapp/` と `etc/` に未コミット変更が無い
 
 ## 3. 初回セットアップ（このPCのみ）
@@ -202,7 +204,37 @@ logs/20261031_130000/
 - `--limit` を使うときは `localhost` も含める（含めないと日時がホストごとに別になる）
 - サーバー側の退避ファイルは消さないので、溜まったら `df -h /` を見て手で消す
 
-## 8. ロールバック
+## 8. netdata の導入（全4台）
+
+計測用に netdata を全4台へ入れる。**デプロイとは独立**したプレイブックで、`deploy.yml` からは呼ばない。
+
+```bash
+cd ansible
+ansible-playbook playbooks/netdata.yml                  # 4台すべて
+ansible-playbook playbooks/netdata.yml --limit asia2    # 1台だけ
+```
+
+- asia1 と同じ **Netdata 公式 apt リポジトリ（edge チャンネル）** のネイティブパッケージを使う
+- リポジトリと鍵は `netdata-repo-edge` の .deb で入れる（`/etc/apt/sources.list.d/netdata-edge.sources`）
+- **既に入っていればダウンロードもインストールもしない**（何度実行してもよい）
+- `netdata` を自動起動にし、`netdata-updater.timer` は止める（競技中に勝手に更新・再起動されないように）
+- 検証: `is-active netdata` / `ss -ltn` に `:19999` / `127.0.0.1:19999/api/v1/info` が 200 / 最後にバージョンを表示
+
+| # | タスク | 内容 |
+|---|---|---|
+| 1 | 前提確認 | Ubuntu 24.04 (noble) 以外では止まる |
+| 2 | 導入状況の確認 | `dpkg-query` で netdata の有無を判定 |
+| 3 | リポジトリ設定 | 未導入のときだけ .deb を取得して `apt` に渡す |
+| 4 | インストール | `apt install netdata`（`update_cache`） |
+| 5 | 自動更新の停止 | `netdata-updater.timer` を disable + stop |
+| 6 | 起動 | `systemctl enable --now netdata` |
+| 7 | 検証 | active / 19999 待ち受け / API 200 / バージョン表示 |
+
+計測の前後は AGENTS.md のルールに従う。**ベンチ前に `sudo systemctl stop netdata` で止める**（CPU を使わせない）。
+ダッシュボードは `http://<public-ip>:19999/`。セキュリティグループで 19999 が開いていること。
+`/var/cache/netdata` に十数MB書くので、`df -h /` を確認する。
+
+## 9. ロールバック
 
 ```bash
 # 回帰したコミットを revert する PR を作る → main にマージ
@@ -212,7 +244,7 @@ cd ansible && ansible-playbook playbooks/deploy.yml
 
 main を配るだけなので、戻す操作もデプロイと同じ1コマンド。
 
-## 9. 注意事項
+## 10. 注意事項
 
 - **ベンチマーク実行中にデプロイしない**（`isureal-python` の再起動で SSE と接続が切れる）
 - alp は**アプリ3台にだけ**入れる（asia2 は DB 専用で nginx のログが無い）。
@@ -233,7 +265,7 @@ main を配るだけなので、戻す操作もデプロイと同じ1コマン�
   （相対パスは参照元ファイルの位置を基準に解決される）。`conf.d/isucon.conf` の
   `listen_addresses = '*'` はそのまま有効
 
-## 10. トラブルシュート
+## 11. トラブルシュート
 
 | 症状 | 原因と対処 |
 |---|---|
@@ -247,3 +279,7 @@ main を配るだけなので、戻す操作もデプロイと同じ1コマン�
 | `journalctl` の確認で failed | アプリが例外で落ちている。`journalctl -u isureal-python -n 100` を読む |
 | `接続を受け付けているか確認` で failed | asia2 で `systemctl status postgresql` と `/var/log/postgresql/postgresql-16-main.log` を見る |
 | `alp のアーカイブをダウンロード` で failed | サーバから GitHub へ HTTPS で出られるか確認（`ssh isucon@<ip> curl -I https://github.com`） |
+| `リポジトリ設定の deb をダウンロード` で failed | サーバから `repository.netdata.cloud` へ HTTP で出られるか確認（`ssh isucon@<ip> curl -I http://repository.netdata.cloud`） |
+| `netdata をインストール` で failed | `apt policy netdata` で edge リポジトリが見えているか、`sudo apt update` のエラーを読む |
+| `19999 で待ち受けているか確認` で failed | `systemctl status netdata` と `/var/log/netdata/error.log` を見る。`netdata.conf` の `bind to` を変えていないか確認 |
+| ダッシュボードに外から繋がらない | セキュリティグループで 19999/tcp が開いているか確認（サーバ側の ufw は既定で inactive） |
