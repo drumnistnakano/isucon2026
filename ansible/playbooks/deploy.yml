@@ -172,6 +172,8 @@
       when: not dry_run
 
     - name: インデックスが作成されたか確認
+      # pg_schema_ddl の name は「作成される索引名」と一致させること。
+      # ここでは public の索引名一覧と突き合わせて、足りないものがあれば失敗する。
       ansible.builtin.command:
         argv:
           - psql
@@ -180,7 +182,7 @@
           - -d
           - "{{ pg_db }}"
           - -c
-          - SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'users' ORDER BY indexname
+          - SELECT indexname FROM pg_indexes WHERE schemaname = 'public' ORDER BY indexname
       register: pg_index_check
       changed_when: false
       failed_when: >-
