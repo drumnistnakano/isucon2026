@@ -104,6 +104,7 @@ CREATE TABLE login_sessions (
   invalidated_at timestamptz,
   reason text
 );
+CREATE INDEX login_sessions_active_token_hash ON login_sessions(token_hash) WHERE active;
 
 CREATE TABLE administrator_sessions (
   id varchar(36) PRIMARY KEY,
@@ -183,6 +184,8 @@ CREATE TABLE friend_requests (
   created_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL
 );
+CREATE INDEX friend_requests_pending_recipient ON friend_requests(recipient_id) WHERE status = 'pending';
+CREATE INDEX friend_requests_pending_requester ON friend_requests(requester_id) WHERE status = 'pending';
 
 CREATE TABLE realmojis (
   id varchar(36) PRIMARY KEY,
