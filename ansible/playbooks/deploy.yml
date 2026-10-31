@@ -1,62 +1,54 @@
 ---
-# main ブランチの内容をアプリ3台（asia1 / europe1 / america1）へデプロイする。
+# main ブランチの内容をアプリ3台（asia1 / europe1 / america1）と DB 1台（asia2）へデプロイする。
 #
 # 使い方（必ず ansible/ ディレクトリで実行する）:
 #   ansible-playbook playbooks/deploy.yml                       # 本番デプロイ
 #   ansible-playbook playbooks/deploy.yml -e rsync_dry_run=true # 転送内容の確認だけ
-#   ansible-playbook playbooks/deploy.yml --limit asia1         # 1台だけ先行
+#   ansible-playbook playbooks/deploy.yml --limit 'asia1,localhost'  # アプリ1台だけ先行
 #
-# 前提: ローカルの main が origin/main と一致し、webapp/ に未コミット変更が無いこと。
+# 前提: ローカルの main が origin/main と一致し、webapp/ と etc/ に未コミット変更が無いこと。
 #       条件を満たさない場合は何も変更せずに失敗する。
+#
+# 送るもの:
+#   webapp/python/        -> アプリ3台 /home/isucon/webapp/python/
+#   webapp/sql/           -> アプリ3台 /home/isucon/webapp/sql/
+#   etc/nginx/            -> アプリ3台 /home/isucon/etc/nginx/（/etc/nginx/nginx.conf から symlink）
+#   etc/postgresql/       -> DB 1台 /etc/postgresql/16/main/postgresql.conf
+#
+# 再起動は毎回行う（DB 再起動で切れた接続をアプリ側で張り直すため、DB -> アプリの順）。
 
-- name: アプリ3台へデプロイする
-  hosts: app
-  serial: 1          # 1台ずつ。クロスリージョンの回線を奪い合わない
+- name: ローカルの main がデプロイ可能か確認する
+  hosts: localhost
+  connection: local
   gather_facts: false
 
   vars:
     repo: "{{ playbook_dir }}/../.."
-    remote_webapp: /home/isucon/webapp
-    dry_run: "{{ rsync_dry_run | default(false) | bool }}"
-    rsync_excludes:
-      - "--exclude=.venv/"
-      - "--exclude=__pycache__/"
-      - "--exclude=._*"
-    rsync_opts: "{{ rsync_excludes + (['--dry-run'] if dry_run else []) }}"
 
-  pre_tasks:
-    # --- ここからローカル（このPC）の確認。1回だけ実行する ---
+  tasks:
     - name: origin を取得
       ansible.builtin.command:
         cmd: git -C {{ repo }} fetch --prune origin
-      delegate_to: localhost
-      run_once: true
       changed_when: false
 
     - name: origin/main の SHA を取得
       ansible.builtin.command:
         cmd: git -C {{ repo }} rev-parse origin/main
-      delegate_to: localhost
-      run_once: true
       register: origin_main
       changed_when: false
 
     - name: ローカル HEAD の SHA を取得
       ansible.builtin.command:
         cmd: git -C {{ repo }} rev-parse HEAD
-      delegate_to: localhost
-      run_once: true
       register: local_head
       changed_when: false
 
-    - name: webapp に未コミットの変更が無いことを確認
+    - name: webapp と設定ファイルに未コミットの変更が無いことを確認
       ansible.builtin.command:
-        cmd: git -C {{ repo }} status --porcelain -- webapp
-      delegate_to: localhost
-      run_once: true
-      register: webapp_dirty
+        cmd: git -C {{ repo }} status --porcelain -- webapp etc
+      register: repo_dirty
       changed_when: false
-      failed_when: webapp_dirty.stdout | length > 0
+      failed_when: repo_dirty.stdout | length > 0
 
     - name: HEAD が origin/main と一致することを確認
       ansible.builtin.assert:
@@ -66,10 +58,105 @@
           HEAD ({{ local_head.stdout[:7] }}) が origin/main ({{ origin_main.stdout[:7] }}) と違う。
           main に切り替えて git pull してからデプロイすること。
         success_msg: "デプロイ対象: {{ origin_main.stdout[:7] }}"
-      delegate_to: localhost
-      run_once: true
+
+    - name: デプロイ対象の SHA を後続の play に渡す
+      ansible.builtin.set_fact:
+        deploy_sha: "{{ origin_main.stdout }}"
+        deploy_short: "{{ origin_main.stdout[:7] }}"
+
+
+- name: DB 1台へ設定をデプロイする
+  hosts: db
+  gather_facts: false
+
+  vars:
+    repo: "{{ playbook_dir }}/../.."
+    remote_pg_conf: /etc/postgresql/16/main/postgresql.conf
+    dry_run: "{{ rsync_dry_run | default(false) | bool }}"
+    deploy_sha: "{{ hostvars['localhost']['deploy_sha'] | default('') }}"
+    deploy_short: "{{ deploy_sha[:7] }}"
 
   tasks:
+    - name: ローカル確認の play が実行されているか確認
+      ansible.builtin.assert:
+        that:
+          - deploy_sha | length > 0
+        fail_msg: >-
+          ローカル確認の play が実行されていない。--limit を使う場合は
+          localhost も含めること（例: --limit 'asia1,localhost'）。
+
+    - name: PostgreSQL 設定を配置
+      ansible.builtin.copy:
+        src: "{{ repo }}/etc/postgresql/16/main/postgresql.conf"
+        dest: "{{ remote_pg_conf }}"
+        owner: postgres
+        group: postgres
+        mode: "0644"
+      become: true
+      check_mode: "{{ dry_run }}"
+
+    - name: PostgreSQL を再起動
+      ansible.builtin.systemd:
+        name: postgresql
+        state: restarted
+      become: true
+      when: not dry_run
+
+    - name: PostgreSQL が起動しているか確認
+      ansible.builtin.command:
+        cmd: systemctl is-active postgresql
+      register: pg_svc
+      changed_when: false
+      failed_when: pg_svc.stdout | trim != "active"
+      when: not dry_run
+
+    - name: 接続を受け付けているか確認
+      ansible.builtin.command:
+        cmd: pg_isready -h 127.0.0.1 -p 5432
+      register: pg_ready
+      changed_when: false
+      retries: 10
+      delay: 2
+      until: pg_ready.rc == 0
+      when: not dry_run
+
+    - name: 直近のログに PANIC が出ていないか確認
+      ansible.builtin.command:
+        cmd: tail -n 30 /var/log/postgresql/postgresql-16-main.log
+      register: pg_log
+      become: true
+      changed_when: false
+      failed_when: "'PANIC' in pg_log.stdout"
+      when: not dry_run
+
+
+- name: アプリ3台へデプロイする
+  hosts: app
+  serial: 1          # 1台ずつ。クロスリージョンの回線を奪い合わない
+  gather_facts: false
+
+  vars:
+    repo: "{{ playbook_dir }}/../.."
+    remote_webapp: /home/isucon/webapp
+    remote_etc: /home/isucon/etc
+    dry_run: "{{ rsync_dry_run | default(false) | bool }}"
+    deploy_sha: "{{ hostvars['localhost']['deploy_sha'] | default('') }}"
+    deploy_short: "{{ deploy_sha[:7] }}"
+    rsync_excludes:
+      - "--exclude=.venv/"
+      - "--exclude=__pycache__/"
+      - "--exclude=._*"
+    rsync_opts: "{{ rsync_excludes + (['--dry-run'] if dry_run else []) }}"
+
+  tasks:
+    - name: ローカル確認の play が実行されているか確認
+      ansible.builtin.assert:
+        that:
+          - deploy_sha | length > 0
+        fail_msg: >-
+          ローカル確認の play が実行されていない。--limit を使う場合は
+          localhost も含めること（例: --limit 'asia1,localhost'）。
+
     - name: python 実装を同期
       ansible.posix.synchronize:
         src: "{{ repo }}/webapp/python/"
@@ -77,7 +164,6 @@
         delete: true
         rsync_opts: "{{ rsync_opts }}"
       register: python_sync
-      notify: isureal-python を再起動
 
     - name: SQL 定義を同期
       ansible.posix.synchronize:
@@ -85,7 +171,13 @@
         dest: "{{ remote_webapp }}/sql/"
         delete: true
         rsync_opts: "{{ rsync_opts }}"
-      notify: isureal-python を再起動
+
+    - name: nginx 設定を同期
+      ansible.posix.synchronize:
+        src: "{{ repo }}/etc/nginx/"
+        dest: "{{ remote_etc }}/nginx/"
+        delete: true
+        rsync_opts: "{{ rsync_opts }}"
 
     - name: Python の依存関係を同期
       ansible.builtin.command:
@@ -94,25 +186,49 @@
       when:
         - not dry_run
         - python_sync.changed
-      notify: isureal-python を再起動
+
+    - name: nginx 設定の構文を確認
+      ansible.builtin.command:
+        cmd: nginx -t
+      become: true
+      changed_when: false
+      when: not dry_run
 
     - name: デプロイしたコミットを記録
       ansible.builtin.copy:
-        content: "{{ origin_main.stdout }}\n"
+        content: "{{ deploy_sha }}\n"
         dest: "{{ remote_webapp }}/DEPLOYED_COMMIT"
         mode: "0644"
       when: not dry_run
 
-    # 検証より先に再起動を済ませる（ハンドラは通常 play の最後に走るため）
-    - name: 再起動をここで実行
-      ansible.builtin.meta: flush_handlers
+    - name: isureal-python を再起動
+      ansible.builtin.systemd:
+        name: isureal-python
+        state: restarted
+      become: true
+      when: not dry_run
 
-    - name: サービスが起動しているか確認
+    - name: nginx を再起動
+      ansible.builtin.systemd:
+        name: nginx
+        state: restarted
+      become: true
+      when: not dry_run
+
+    - name: isureal-python が起動しているか確認
       ansible.builtin.command:
         cmd: systemctl is-active isureal-python
-      register: svc
+      register: app_svc
       changed_when: false
-      failed_when: svc.stdout | trim != "active"
+      failed_when: app_svc.stdout | trim != "active"
+      when: not dry_run
+
+    - name: nginx が起動しているか確認
+      ansible.builtin.command:
+        cmd: systemctl is-active nginx
+      register: nginx_svc
+      changed_when: false
+      failed_when: nginx_svc.stdout | trim != "active"
       when: not dry_run
 
     - name: アプリが応答するか確認（404 が返ればプロセスは生きている）
@@ -136,23 +252,15 @@
     - name: デプロイ結果を検証
       ansible.builtin.assert:
         that:
-          - deployed.stdout | trim == origin_main.stdout
-        fail_msg: "DEPLOYED_COMMIT ({{ deployed.stdout | trim }}) が期待値 ({{ origin_main.stdout }}) と違う"
-        success_msg: "{{ inventory_hostname }}: {{ origin_main.stdout[:7] }} を適用済み"
+          - deployed.stdout | trim == deploy_sha
+        fail_msg: "DEPLOYED_COMMIT ({{ deployed.stdout | trim }}) が期待値 ({{ deploy_sha }}) と違う"
+        success_msg: "{{ inventory_hostname }}: {{ deploy_short }} を適用済み"
       when: not dry_run
 
     - name: 直近のログに例外が出ていないか確認
       ansible.builtin.command:
         cmd: journalctl -u isureal-python -n 30 --no-pager
-      register: applog
+      register: app_log
       changed_when: false
-      failed_when: "'Traceback' in applog.stdout"
-      when: not dry_run
-
-  handlers:
-    - name: isureal-python を再起動
-      ansible.builtin.systemd:
-        name: isureal-python
-        state: restarted
-      become: true
+      failed_when: "'Traceback' in app_log.stdout"
       when: not dry_run
