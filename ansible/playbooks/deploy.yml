@@ -180,6 +180,8 @@
       - "--exclude=__pycache__/"
       - "--exclude=._*"
     rsync_opts: "{{ rsync_excludes + ['--mkpath'] + (['--dry-run'] if dry_run else []) }}"
+    # isucon-tools の tools/alp.sh と同じバージョンに揃える
+    alp_version: "1.0.21"
 
   tasks:
     - name: ローカル確認の play が実行されているか確認
@@ -305,4 +307,81 @@
       register: app_log
       changed_when: false
       failed_when: "'Traceback' in app_log.stdout"
+      when: not dry_run
+
+    # 解析ツール alp を /usr/local/bin に入れる（isucon-tools の tools/alp.sh と同じ手順）。
+    # アプリの応答には影響しないよう、デプロイ検証のあとに実行する。
+    # 既に同じバージョンが入っていればダウンロードも配置も skip する。
+    - name: CPU アーキテクチャを確認
+      ansible.builtin.command:
+        cmd: uname -m
+      register: alp_machine
+      changed_when: false
+
+    - name: alp の配布アーキテクチャ名を決める
+      ansible.builtin.set_fact:
+        alp_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(alp_machine.stdout | trim, '') }}"
+
+    - name: alp の配布物があるアーキテクチャか確認
+      ansible.builtin.assert:
+        that:
+          - alp_arch | length > 0
+        fail_msg: "alp の配布物が無いアーキテクチャ: {{ alp_machine.stdout | trim }}"
+
+    - name: 導入済み alp のバージョンを確認
+      ansible.builtin.command:
+        cmd: alp --version
+      register: alp_current
+      changed_when: false
+      failed_when: false
+      when: not dry_run
+
+    - name: alp のアーカイブをダウンロード
+      ansible.builtin.get_url:
+        url: "https://github.com/tkuchiki/alp/releases/download/v{{ alp_version }}/alp_linux_{{ alp_arch }}.tar.gz"
+        dest: "/tmp/alp_linux_{{ alp_arch }}.tar.gz"
+        mode: "0644"
+      when:
+        - not dry_run
+        - alp_current.stdout | default('') | trim != alp_version
+
+    - name: alp を展開
+      ansible.builtin.unarchive:
+        src: "/tmp/alp_linux_{{ alp_arch }}.tar.gz"
+        dest: /tmp
+        remote_src: true
+      when:
+        - not dry_run
+        - alp_current.stdout | default('') | trim != alp_version
+
+    - name: alp を /usr/local/bin に配置
+      ansible.builtin.copy:
+        src: /tmp/alp
+        dest: /usr/local/bin/alp
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+      become: true
+      when:
+        - not dry_run
+        - alp_current.stdout | default('') | trim != alp_version
+
+    - name: alp のアーカイブと展開物を削除
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/tmp/alp_linux_{{ alp_arch }}.tar.gz"
+        - /tmp/alp
+      when:
+        - not dry_run
+        - alp_current.stdout | default('') | trim != alp_version
+
+    - name: alp のバージョンを確認
+      ansible.builtin.command:
+        cmd: alp --version
+      register: alp_installed
+      changed_when: false
+      failed_when: alp_installed.stdout | trim != alp_version
       when: not dry_run
