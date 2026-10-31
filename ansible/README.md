@@ -22,6 +22,7 @@ ansible/
 - このPCから `ssh isucon@<ip>` が鍵認証で通ること（`~/.ssh/id_ed25519`）
 - サーバの `isucon` は `sudo` パスワードなしで `systemctl restart isureal-python` を実行できる
 - サーバに `rsync` がある（3.2.7 で確認済み）
+- サーバに `/home/isucon/local/uv/uv` がある（0.13.5 で確認済み）
 - ローカルの main が origin/main と一致し、`webapp/` に未コミット変更が無い
 
 ## 3. 初回セットアップ（このPCのみ）
@@ -66,7 +67,7 @@ cd ansible
 ansible-playbook playbooks/deploy.yml -e rsync_dry_run=true
 ```
 
-- 転送内容だけを表示し、再起動・記録・検証はすべてスキップする
+- 転送内容だけを表示し、依存関係更新・再起動・記録・検証はすべてスキップする
 - ローカルの状態チェック（main と一致しているか、未コミットが無いか）は**本番実行と同じ**に走る
 
 ### 4.2 1台だけ先行
@@ -92,9 +93,10 @@ ansible-playbook playbooks/deploy.yml
 | 1 | ローカル確認 | `git fetch`、HEAD と origin/main の一致、`webapp/` の未コミット検出（このPC上、1回だけ） |
 | 2 | python 同期 | `webapp/python/` → `/home/isucon/webapp/python/`（`--delete`） |
 | 3 | SQL 同期 | `webapp/sql/` → `/home/isucon/webapp/sql/`（`--delete`） |
-| 4 | 版の記録 | `/home/isucon/webapp/DEPLOYED_COMMIT` に SHA を書き込む |
-| 5 | 再起動 | 変更があったホストだけ `systemctl restart isureal-python`（`become`） |
-| 6 | 検証 | `is-active` / `127.0.0.1:8080` の応答 / `DEPLOYED_COMMIT` の一致 / `journalctl` に `Traceback` が無い |
+| 4 | 依存関係の同期 | python に変更があったホストだけ `uv sync --frozen --no-dev` を実行 |
+| 5 | 版の記録 | `/home/isucon/webapp/DEPLOYED_COMMIT` に SHA を書き込む |
+| 6 | 再起動 | 変更があったホストだけ `systemctl restart isureal-python`（`become`） |
+| 7 | 検証 | `is-active` / `127.0.0.1:8080` の応答 / `DEPLOYED_COMMIT` の一致 / `journalctl` に `Traceback` が無い |
 
 ### 送らないもの（意図的）
 
@@ -103,7 +105,7 @@ ansible-playbook playbooks/deploy.yml
 | `~/env.sh` | サーバ固有（`ISUREAL_REGION` が asia/europe/america）＋秘密情報を含む |
 | `webapp/public/` | 配布された静的ファイルは内容維持が必須 |
 | `webapp/{go,nodejs,perl,php,ruby,rust}/` | 使わない言語実装 |
-| `webapp/python/.venv/`, `__pycache__/` | サーバ側の実行環境。消すと起動しなくなる |
+| `webapp/python/.venv/`, `__pycache__/` | rsync では消さず、`.venv` は `uv sync` で更新する |
 | DB のデータ | `POST /api/initialize` が初期化する |
 
 ## 6. DB 変更（スキーマ・インデックス）

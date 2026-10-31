@@ -76,6 +76,7 @@
         dest: "{{ remote_webapp }}/python/"
         delete: true
         rsync_opts: "{{ rsync_opts }}"
+      register: python_sync
       notify: isureal-python を再起動
 
     - name: SQL 定義を同期
@@ -84,6 +85,15 @@
         dest: "{{ remote_webapp }}/sql/"
         delete: true
         rsync_opts: "{{ rsync_opts }}"
+      notify: isureal-python を再起動
+
+    - name: Python の依存関係を同期
+      ansible.builtin.command:
+        cmd: /home/isucon/local/uv/uv sync --frozen --no-dev
+        chdir: "{{ remote_webapp }}/python"
+      when:
+        - not dry_run
+        - python_sync.changed
       notify: isureal-python を再起動
 
     - name: デプロイしたコミットを記録
