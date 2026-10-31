@@ -168,7 +168,7 @@
       - "--exclude=.venv/"
       - "--exclude=__pycache__/"
       - "--exclude=._*"
-    rsync_opts: "{{ rsync_excludes + (['--dry-run'] if dry_run else []) }}"
+    rsync_opts: "{{ rsync_excludes + ['--mkpath'] + (['--dry-run'] if dry_run else []) }}"
 
   tasks:
     - name: ローカル確認の play が実行されているか確認
