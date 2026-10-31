@@ -5,6 +5,7 @@
 #   ansible-playbook playbooks/deploy.yml                       # 本番デプロイ
 #   ansible-playbook playbooks/deploy.yml -e rsync_dry_run=true # 転送内容の確認だけ
 #   ansible-playbook playbooks/deploy.yml --limit 'asia1,localhost'  # アプリ1台だけ先行
+#   ansible-playbook playbooks/deploy.yml -e deploy_serial=1         # アプリを1台ずつ流す
 #
 # 前提: ローカルの main が origin/main と一致し、webapp/ と etc/ に未コミット変更が無いこと。
 #       条件を満たさない場合は何も変更せずに失敗する。
@@ -209,7 +210,8 @@
 
 - name: アプリ3台へデプロイする
   hosts: app
-  serial: 1          # 1台ずつ。クロスリージョンの回線を奪い合わない
+  # 既定は3台同時（forks = 3）。回線が細いときは -e deploy_serial=1 で1台ずつにする
+  serial: "{{ deploy_serial | default('100%') }}"
   gather_facts: false
 
   vars:
