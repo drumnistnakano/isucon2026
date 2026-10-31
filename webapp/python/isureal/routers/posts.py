@@ -42,7 +42,7 @@ async def lock_current_window(db: Connection, region: str) -> DictRow | None:
         db,
         """
         SELECT id, local_date, starts_at FROM posting_windows
-        WHERE region = %(region)s AND ended_at IS NULL FOR UPDATE
+        WHERE region = %(region)s AND ended_at IS NULL FOR SHARE
         """,
         {"region": region},
     )
