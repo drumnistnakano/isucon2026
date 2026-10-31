@@ -142,8 +142,9 @@ DB 設定を先に反映し、そのあとアプリを再起動する（DB 再�
 | 6 | nginx 設定の検証 | `nginx -t -c /home/isucon/etc/nginx/nginx.conf`（`become`）。壊れていれば symlink を差し替えずに止まる |
 | 7 | symlink 作成 | `/etc/nginx/nginx.conf` → `/home/isucon/etc/nginx/nginx.conf`（`become`） |
 | 8 | 版の記録 | `/home/isucon/webapp/DEPLOYED_COMMIT` に SHA を書き込む |
-| 9 | 再起動 | `systemctl restart isureal-python` → `systemctl restart nginx`（`become`） |
-| 10 | 検証 | `is-active`（アプリ・nginx）/ `127.0.0.1:8080` の応答 / `DEPLOYED_COMMIT` の一致 / `journalctl` に `Traceback` が無い |
+| 9 | fd 上限 | `isureal-python.service.d/limit-nofile.conf` と `nginx.service.d/limit-nofile.conf` を作り `daemon-reload`（`LimitNOFILE=65536`） |
+| 10 | 再起動 | `systemctl restart isureal-python` → `systemctl restart nginx`（`become`） |
+| 11 | 検証 | `is-active`（アプリ・nginx）/ fd 上限が `65536` / `127.0.0.1:8080` の応答 / `DEPLOYED_COMMIT` の一致 / `journalctl` に `Traceback` が無い |
 | 11 | alp の導入 | `alp` v1.0.21 を `/usr/local/bin/alp` に配置（同じ版が入っていれば skip） |
 
 ### 送らないもの（意図的）
@@ -301,6 +302,7 @@ main を配るだけなので、戻す操作もデプロイと同じ1コマン�
 - サーバ側で直接ファイルを編集しない。次のデプロイで上書きされる
   - `/etc/nginx/nginx.conf` → `~/etc/nginx/nginx.conf` への symlink
   - `/etc/postgresql/16/main/postgresql.conf` → `~/etc/postgresql/16/main/postgresql.conf` への symlink
+  - `/etc/systemd/system/{isureal-python,nginx}.service.d/limit-nofile.conf`（`LimitNOFILE=65536`）
 - **初回だけ `/etc` の実ファイルが symlink に置き換わる**（`force: true`）。asia2 の
   `postgresql.conf` と、europe1 / america1 の既定 `nginx.conf` がこれに当たる。
   置き換え後の内容はリポジトリの `etc/` と同じになる
