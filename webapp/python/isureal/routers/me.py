@@ -15,6 +15,7 @@ from ..image_cache import ImageCache
 from ..jpeg import jpeg_failure
 from ..models.post import POST_COLUMNS, Post
 from ..models.user import User, get_user, user_columns, valid_region, valid_user_text
+from ..notification_hub import NOTIFY_QUERY, user_key
 from ..schemas import ExportPostResponse, MeResponse
 
 router = APIRouter(prefix="/api/me")
@@ -62,6 +63,9 @@ async def update_me(
                     f"UPDATE users SET {column} = %(value)s, updated_at = clock_timestamp() WHERE id = %(id)s",
                     {"id": session.user_id, "value": value},
                 )
+        if body.region is not None:
+            # リージョンが変わったら、待っている SSE を終わらせる
+            await execute(db, NOTIFY_QUERY, {"key": user_key(session.user_id)})
         user = await get_user(db, session.user_id)
         if user is None:
             raise APIError(HTTPStatus.NOT_FOUND, "account_not_found")
@@ -160,6 +164,8 @@ async def delete_account(db: DB, session: RegionalSession) -> Response:
             """,
             {"id": session.user_id},
         )
+        # 待っている SSE を終わらせる
+        await execute(db, NOTIFY_QUERY, {"key": user_key(session.user_id)})
     return Response(status_code=HTTPStatus.NO_CONTENT)
 
 

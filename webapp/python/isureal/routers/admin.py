@@ -14,6 +14,7 @@ from ..errors import APIError, NoRowsError
 from ..models.posting_window import get_posting_window
 from ..models.session import create_admin_session, invalidate_admin_session
 from ..models.user import valid_region, valid_username
+from ..notification_hub import NOTIFY_QUERY, region_key
 from ..schemas import AdminLoginResponse, PostingWindowResponse
 from ..timeutil import parse_date
 
@@ -139,15 +140,24 @@ async def open_posting_window(
     # ここは対象ユーザー全員ぶんの INSERT で数百msかかるため、トランザクション内に
     # 入れたままだと、その間ずっと posting_windows の行が FOR SHARE で待たされ、
     # 投稿（フィード検証10点の前提）が詰まる。
+    # 待っている SSE を起こす。NOTIFY は COMMIT 時に届くので、受け取った側には通知の行が見える
     await execute(
         db,
-        """
-        INSERT INTO notifications (id, user_id, posting_window_id, created_at)
-        SELECT gen_random_uuid()::text, u.id, %(window_id)s, %(starts_at)s
-        FROM users u
-        WHERE u.region = %(region)s AND u.status = 'active'
-          AND EXISTS (SELECT 1 FROM login_sessions s WHERE s.user_id = u.id)
+        f"""
+        WITH inserted AS (
+          INSERT INTO notifications (id, user_id, posting_window_id, created_at)
+          SELECT gen_random_uuid()::text, u.id, %(window_id)s, %(starts_at)s
+          FROM users u
+          WHERE u.region = %(region)s AND u.status = 'active'
+            AND EXISTS (SELECT 1 FROM login_sessions s WHERE s.user_id = u.id)
+        )
+        {NOTIFY_QUERY}
         """,
-        {"region": body.region, "window_id": window_id, "starts_at": starts_at},
+        {
+            "region": body.region,
+            "window_id": window_id,
+            "starts_at": starts_at,
+            "key": region_key(body.region),
+        },
     )
     return PostingWindowResponse.of(window)
