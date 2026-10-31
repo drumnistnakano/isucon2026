@@ -107,7 +107,13 @@ ansible-playbook playbooks/deploy.yml --limit 'asia1,localhost'
 ansible-playbook playbooks/deploy.yml
 ```
 
-`serial: 1` なのでアプリは 1台ずつ順番に流れる（クロスリージョンの回線を奪い合わない）。
+アプリ3台は**同時に**流れる（`ansible.cfg` の `forks = 3`）。3台が同時に再起動するので、その間はどのアプリも応答しない。
+回線が細い・1台ずつ様子を見たいときは `-e deploy_serial=1` で1台ずつにする。
+
+```bash
+ansible-playbook playbooks/deploy.yml -e deploy_serial=1
+```
+
 DB 設定は 1台だけなので、アプリより先に反映される。
 
 ## 5. 実行される内容
@@ -124,7 +130,7 @@ DB 設定を先に反映し、そのあとアプリを再起動する（DB 再�
 | 3 | 再起動 | `systemctl restart postgresql`（`become`） |
 | 4 | 検証 | `is-active postgresql` / `pg_isready -h 127.0.0.1 -p 5432` / `ss -ltn` に `0.0.0.0:5432` がある / ログに `PANIC` が無い |
 
-### アプリ3台（asia1 / europe1 / america1、1台ずつ）
+### アプリ3台（asia1 / europe1 / america1、同時）
 
 | # | タスク | 内容 |
 |---|---|---|
