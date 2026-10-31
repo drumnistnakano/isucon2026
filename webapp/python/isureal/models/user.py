@@ -1,8 +1,9 @@
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from ..config import REGIONS
-from ..db import Connection, fetch_one, from_row
+from ..db import Connection, fetch_all, fetch_one, from_row
 from ..image_signature import image_signing_key, signed_image_url
 
 USERNAME_PATTERN = re.compile(r"[a-z0-9_.-]{1,64}", re.ASCII)
@@ -80,6 +81,15 @@ LOCK_USER_QUERY = "SELECT id FROM users WHERE id = %(user_id)s FOR NO KEY UPDATE
 LOCK_ACTIVE_USER_QUERY = """
 SELECT id FROM users WHERE id = %(user_id)s AND status = 'active' FOR NO KEY UPDATE
 """
+# 複数ユーザーを 1 往復でロックする。ORDER BY の上で行をロックするので ID 順になり、
+# デッドロックしない
+LOCK_USERS_QUERY = """
+SELECT id FROM users WHERE id = ANY(%(user_ids)s) ORDER BY id FOR NO KEY UPDATE
+"""
+LOCK_ACTIVE_USERS_QUERY = """
+SELECT id FROM users WHERE id = ANY(%(user_ids)s) AND status = 'active'
+ORDER BY id FOR NO KEY UPDATE
+"""
 
 
 async def lock_user(db: Connection, user_id: str, *, active_only: bool = False) -> bool:
@@ -91,3 +101,10 @@ async def lock_user(db: Connection, user_id: str, *, active_only: bool = False) 
         {"id": user_id},
     )
     return row is not None
+
+
+async def lock_users(db: Connection, user_ids: Iterable[str]) -> bool:
+    """複数ユーザーの行を 1 往復でロックする。1 人でも行がなければ False"""
+    ids = sorted(set(user_ids))
+    rows = await fetch_all(db, LOCK_USERS_QUERY, {"user_ids": ids})
+    return len(rows) == len(ids)

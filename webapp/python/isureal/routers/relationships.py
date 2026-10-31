@@ -9,6 +9,7 @@ from ..binding import RequestBody, cursor_time, json_body
 from ..db import DB, execute, fetch_all, fetch_value, from_row
 from ..errors import APIError, NoRowsError
 from ..models.relationship import (
+    BLOCKED_PAIR_CONDITION,
     FRIEND_PAIRS_QUERY,
     IS_BLOCKED_QUERY,
     friend_ids_from_pairs,
@@ -17,7 +18,7 @@ from ..models.relationship import (
     is_blocked,
     relationship_transaction,
 )
-from ..models.user import User, get_user, user_columns
+from ..models.user import User, user_columns
 from ..schemas import FriendRequestResponse, Page, RelationshipResponse, UserResponse
 
 router = APIRouter(prefix="/api")
@@ -237,24 +238,21 @@ async def delete_friendship(db: DB, session: RegionalSession, user_id: str) -> R
 async def follow(db: DB, session: RegionalSession, user_id: str) -> Response:
     actor = session.user_id
     async with relationship_transaction(db, actor, user_id):
-        target = await get_user(db, user_id)
-        if target is None:
-            raise NoRowsError
-        if target.account_type != "certified_public" or await is_blocked(
-            db, actor, target.id
+        # 2 人をロックしている間の往復を減らすため、確認と INSERT を 1 文にする。
+        # 相手は relationship_transaction で active を確認済み。
+        # 公認でない・ブロックがある・フォロー済みのときは 1 行も入らない
+        if not await execute(
+            db,
+            f"""
+            INSERT INTO follows (id, follower_id, followee_id)
+            SELECT %(id)s, %(actor)s::varchar, u.id FROM users u
+            WHERE u.id = %(target)s AND u.account_type = 'certified_public'
+              AND NOT {BLOCKED_PAIR_CONDITION}
+            ON CONFLICT (follower_id, followee_id) DO NOTHING
+            """,
+            {"id": str(uuid.uuid4()), "actor": actor, "target": user_id},
         ):
             raise relationship_conflict()
-        if await fetch_value(
-            db,
-            "SELECT EXISTS(SELECT 1 FROM follows WHERE follower_id = %(actor)s AND followee_id = %(target)s)",
-            {"actor": actor, "target": target.id},
-        ):
-            raise relationship_conflict()
-        await execute(
-            db,
-            "INSERT INTO follows (id, follower_id, followee_id) VALUES (%(id)s, %(actor)s, %(target)s)",
-            {"id": str(uuid.uuid4()), "actor": actor, "target": target.id},
-        )
     return no_content()
 
 
@@ -275,42 +273,40 @@ async def unfollow(db: DB, session: RegionalSession, user_id: str) -> Response:
 async def block(db: DB, session: RegionalSession, user_id: str) -> Response:
     actor = session.user_id
     params = {"actor": actor, "target": user_id}
+    low, high = sorted((actor, user_id))
     async with relationship_transaction(db, actor, user_id):
-        if await fetch_value(
+        # 2 人をロックしている間の往復を減らすため、ブロックと関係の解消を 1 文で行う。
+        # ブロック済みなら inserted が空になり、ほかの変更も行わない
+        blocked = await fetch_value(
             db,
-            "SELECT EXISTS(SELECT 1 FROM block_relations WHERE blocker_id = %(actor)s AND blocked_id = %(target)s)",
-            params,
-        ):
+            """
+            WITH inserted AS (
+              INSERT INTO block_relations (id, blocker_id, blocked_id)
+              VALUES (%(id)s, %(actor)s, %(target)s)
+              ON CONFLICT (blocker_id, blocked_id) DO NOTHING
+              RETURNING id
+            ), unfriended AS (
+              DELETE FROM friendships
+              WHERE user_low_id = %(low)s AND user_high_id = %(high)s
+                AND EXISTS (SELECT 1 FROM inserted)
+            ), unfollowed AS (
+              DELETE FROM follows
+              WHERE ((follower_id = %(actor)s AND followee_id = %(target)s)
+                  OR (follower_id = %(target)s AND followee_id = %(actor)s))
+                AND EXISTS (SELECT 1 FROM inserted)
+            ), cancelled AS (
+              UPDATE friend_requests SET status = 'cancelled', updated_at = clock_timestamp()
+              WHERE status = 'pending'
+                AND ((requester_id = %(actor)s AND recipient_id = %(target)s)
+                  OR (requester_id = %(target)s AND recipient_id = %(actor)s))
+                AND EXISTS (SELECT 1 FROM inserted)
+            )
+            SELECT EXISTS (SELECT 1 FROM inserted)
+            """,
+            {"id": str(uuid.uuid4()), "low": low, "high": high, **params},
+        )
+        if not blocked:
             raise relationship_conflict()
-        await execute(
-            db,
-            "INSERT INTO block_relations (id, blocker_id, blocked_id) VALUES (%(id)s, %(actor)s, %(target)s)",
-            {"id": str(uuid.uuid4()), **params},
-        )
-        low, high = sorted((actor, user_id))
-        await execute(
-            db,
-            "DELETE FROM friendships WHERE user_low_id = %(low)s AND user_high_id = %(high)s",
-            {"low": low, "high": high},
-        )
-        await execute(
-            db,
-            """
-            DELETE FROM follows
-            WHERE (follower_id = %(actor)s AND followee_id = %(target)s)
-               OR (follower_id = %(target)s AND followee_id = %(actor)s)
-            """,
-            params,
-        )
-        await execute(
-            db,
-            """
-            UPDATE friend_requests SET status = 'cancelled', updated_at = clock_timestamp()
-            WHERE status = 'pending' AND ((requester_id = %(actor)s AND recipient_id = %(target)s)
-                                          OR (requester_id = %(target)s AND recipient_id = %(actor)s))
-            """,
-            params,
-        )
     return no_content()
 
 
