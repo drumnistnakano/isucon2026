@@ -43,3 +43,6 @@ INSERT INTO block_relations (id, blocker_id, blocked_id, created_at)
 SELECT id, blocker_id, blocked_id, created_at FROM initial_block_relations;
 
 COMMIT;
+
+-- 登録の一意性チェック（ON CONFLICT の対象）。初回だけ作成される
+CREATE UNIQUE INDEX IF NOT EXISTS users_username ON users(username);

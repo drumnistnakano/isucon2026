@@ -153,13 +153,21 @@ DB 設定を先に反映し、そのあとアプリを再起動する（DB 再�
 ## 6. DB 変更（スキーマ・インデックス）
 
 **`POST /api/initialize` ではスキーマは作られない。** `sql/init.sh` が流す `reset.sql` は
-TRUNCATE と初期データ復元だけで、テーブル定義・インデックスは触らない。
+TRUNCATE と初期データ復元だけで、テーブル定義・インデックスは触らない
+（`users_username` の一意インデックスだけは `reset.sql` の末尾で `IF NOT EXISTS` 付きで作る）。
 
 設定ファイル（`postgresql.conf`）は `deploy.yml` が毎回配布して PostgreSQL を再起動する。
 一方、**スキーマやインデックスの変更は配布されない**。インデックス追加やテーブル変更を含む
-ブランチでは、`sql/001-schema.sql` を直すだけでは稼働中の asia2 に反映されない。適用用の
-プレイブック（`playbooks/db-apply.yml`）を別途用意し、asia2 に対して psql で流す。
-**必要になった時点で追加する。**
+ブランチでは、`sql/001-schema.sql` を直したうえで `playbooks/db-apply.yml` を asia2 に対して流す。
+
+```bash
+cd ansible
+ansible-playbook playbooks/db-apply.yml            # 何度実行してもよい
+ansible-playbook playbooks/db-apply.yml --check    # 差分の確認だけ
+```
+
+適用する DDL は `db-apply.yml` の `pg_schema_ddl` に並べる。**コードより先に流すこと**
+（`ON CONFLICT (username)` は一意インデックスが無いとエラーになる）。
 
 ## 7. デプロイ後の確認（ベンチ前チェック）
 

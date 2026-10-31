@@ -1,0 +1,64 @@
+---
+# スキーマ / インデックスの変更を DB 1台（asia2）に適用する。
+#
+# `POST /api/initialize` は reset.sql を流すだけで、テーブル定義とインデックスは作らない。
+# そのため、001-schema.sql に足したインデックスはこのプレイブックで明示的に適用する。
+#
+# 使い方（必ず ansible/ ディレクトリで実行する）:
+#   ansible-playbook playbooks/db-apply.yml
+#   ansible-playbook playbooks/db-apply.yml --check    # 差分があるかだけ見る
+#
+# 何度実行してもよい（IF NOT EXISTS で作る）。
+
+- name: DB にスキーマ変更を適用する
+  hosts: db
+  gather_facts: false
+
+  vars:
+    pg_db: isureal
+    # 001-schema.sql に足したインデックスと同じ定義を並べる
+    pg_schema_ddl:
+      - name: users_username
+        sql: CREATE UNIQUE INDEX IF NOT EXISTS users_username ON users(username)
+
+  tasks:
+    - name: 適用予定を表示
+      ansible.builtin.debug:
+        msg: "{{ pg_schema_ddl | map(attribute='sql') | list }}"
+
+    - name: インデックスの作成
+      ansible.builtin.command:
+        argv:
+          - psql
+          - -X
+          - -v
+          - "ON_ERROR_STOP=1"
+          - -d
+          - "{{ pg_db }}"
+          - -c
+          - "{{ item.sql }}"
+      loop: "{{ pg_schema_ddl }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: true
+      become: true
+      become_user: postgres
+
+    - name: users のインデックスを確認
+      ansible.builtin.command:
+        argv:
+          - psql
+          - -X
+          - -At
+          - -d
+          - "{{ pg_db }}"
+          - -c
+          - SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'users' ORDER BY indexname
+      register: pg_index_check
+      changed_when: false
+      become: true
+      become_user: postgres
+
+    - name: 結果
+      ansible.builtin.debug:
+        msg: "{{ pg_index_check.stdout_lines }}"
