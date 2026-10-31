@@ -1,6 +1,7 @@
 SET session_replication_role = replica;
 
 CREATE INDEX IF NOT EXISTS friendships_user_high_id ON friendships(user_high_id);
+CREATE INDEX IF NOT EXISTS realmojis_image_id ON realmojis(image_id);
 
 BEGIN;
 
