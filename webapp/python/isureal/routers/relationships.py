@@ -6,10 +6,12 @@ from fastapi import APIRouter, Depends, Query, Response
 
 from ..auth import RegionalSession
 from ..binding import RequestBody, cursor_time, json_body
-from ..db import DB, execute, fetch_all, fetch_one, fetch_value, from_row
+from ..db import DB, execute, fetch_all, fetch_value, from_row
 from ..errors import APIError, NoRowsError
 from ..models.relationship import (
-    get_friend_ids,
+    FRIEND_PAIRS_QUERY,
+    IS_BLOCKED_QUERY,
+    friend_ids_from_pairs,
     get_friend_request,
     insert_friendship,
     is_blocked,
@@ -46,13 +48,13 @@ async def create_friend_request(
     ],
 ) -> FriendRequestResponse:
     actor, recipient = session.user_id, body.recipient_id
-    async with relationship_transaction(db, actor, recipient):
-        if await is_blocked(db, actor, recipient):
-            raise relationship_conflict()
-        if recipient in await get_friend_ids(db, actor):
-            raise relationship_conflict()
-        existing = await fetch_one(
-            db,
+    # リージョンをまたぐと往復が重く、2 人のロックも長くなるのでまとめて送る
+    async with relationship_transaction(db, actor, recipient, pipeline=True):
+        blocked_cursor = await db.execute(
+            IS_BLOCKED_QUERY, {"actor": actor, "target": recipient}
+        )
+        friends_cursor = await db.execute(FRIEND_PAIRS_QUERY, {"user_id": actor})
+        existing_cursor = await db.execute(
             """
             SELECT id FROM friend_requests WHERE status = 'pending' AND
               ((requester_id = %(actor)s AND recipient_id = %(recipient)s)
@@ -60,6 +62,15 @@ async def create_friend_request(
             """,
             {"actor": actor, "recipient": recipient},
         )
+        blocked_row = await blocked_cursor.fetchone()
+        if blocked_row is None:
+            raise NoRowsError
+        if blocked_row["blocked"]:
+            raise relationship_conflict()
+        friends = friend_ids_from_pairs(await friends_cursor.fetchall(), actor)
+        if recipient in friends:
+            raise relationship_conflict()
+        existing = await existing_cursor.fetchone()
         if existing is not None:
             # 相手からの申請があれば承認する
             request = await get_friend_request(db, existing["id"])
@@ -115,7 +126,9 @@ async def transition_friend_request(
     )
     if actor != allowed_actor:
         raise relationship_action_forbidden()
-    async with relationship_transaction(db, request.requester_id, request.recipient_id):
+    async with relationship_transaction(
+        db, request.requester_id, request.recipient_id, pipeline=True
+    ):
         request = await get_friend_request(db, request_id)
         if request is None:
             raise NoRowsError

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Response
 
 from ..auth import RegionalSession
 from ..binding import Form, RequestBody, form_body, json_body
-from ..db import DB, execute, fetch_one, fetch_value, from_row
+from ..db import DB, execute, fetch_one, fetch_value, from_row, pipeline_transaction
 from ..errors import APIError, NoRowsError
 from ..jpeg import valid_jpeg
 from ..models.post import (
@@ -87,7 +87,7 @@ async def create_post(
     user_id = session.user_id
     params = {"user_id": user_id}
     # リージョンをまたぐと往復が重く、ユーザーのロックも長くなるのでまとめて送る
-    async with db.pipeline(), db.transaction():
+    async with pipeline_transaction(db):
         locked_cursor = await db.execute(LOCK_USER_QUERY, params)
         user_cursor = await db.execute(ACTIVE_USER_QUERY, params)
         window_cursor = await db.execute(LOCK_USER_WINDOW_QUERY, params)

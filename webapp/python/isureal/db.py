@@ -1,9 +1,12 @@
 from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager, suppress
 from dataclasses import fields
 from typing import Annotated, Any
 
 from fastapi import Depends, Request
 from psycopg import AsyncConnection
+from psycopg import Error as PsycopgError
+from psycopg.pq import TransactionStatus
 from psycopg.rows import DictRow, dict_row
 from psycopg.types.numeric import FloatLoader
 from psycopg_pool import AsyncConnectionPool
@@ -41,6 +44,35 @@ async def get_db(request: Request) -> AsyncIterator[Connection]:
 
 # ハンドラーが返った時点で接続をプールに返す（通知のストリーム中は保持しない）
 DB = Annotated[Connection, Depends(get_db, scope="function")]
+
+
+@asynccontextmanager
+async def pipeline_transaction(db: Connection) -> AsyncIterator[None]:
+    """BEGIN と COMMIT を前後のクエリと同じ通信で送るトランザクション
+
+    db.transaction() は BEGIN と COMMIT で別に往復するので、リージョンをまたぐと遅い。
+    この中では execute() の戻り値（変更行数）を使えない
+    """
+    if db.info.transaction_status != TransactionStatus.IDLE:
+        # すでにトランザクションの中なら COMMIT せず、セーブポイントに任せる
+        async with db.transaction(), db.pipeline():
+            yield
+        return
+    try:
+        async with db.pipeline():
+            await db.execute("BEGIN")
+            try:
+                yield
+            except BaseException:
+                with suppress(PsycopgError):
+                    await db.execute("ROLLBACK")
+                raise
+            await db.execute("COMMIT")
+    except BaseException:
+        # クエリの失敗で ROLLBACK や COMMIT が実行されなかった場合に備える
+        if db.info.transaction_status != TransactionStatus.IDLE:
+            await db.execute("ROLLBACK")
+        raise
 
 
 async def fetch_one(

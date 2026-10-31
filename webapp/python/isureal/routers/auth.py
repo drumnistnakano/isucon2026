@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Request, Response
 
 from ..auth import CurrentSession
 from ..binding import RequestBody, json_body
-from ..db import DB, execute, fetch_one, from_row
+from ..db import DB, execute, fetch_one, from_row, pipeline_transaction
 from ..errors import APIError, NoRowsError
 from ..models.session import create_login_session, invalidate_login_session
 from ..models.user import (
@@ -84,7 +84,8 @@ async def login(
     request.state.username = body.username
     if not valid_username(body.username):
         raise APIError(HTTPStatus.UNAUTHORIZED, "invalid_credentials")
-    async with db.transaction():
+    # リージョンをまたぐと往復が重いので、セッションの更新までまとめて送る
+    async with pipeline_transaction(db):
         row = await fetch_one(
             db,
             f"SELECT {user_columns()} FROM users WHERE username = %(username)s FOR NO KEY UPDATE",
