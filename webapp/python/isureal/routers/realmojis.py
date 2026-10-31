@@ -40,7 +40,7 @@ async def replace_realmoji(
     post = await get_post(db, post_id)
     if post is None or actor == post.author_id:
         raise interaction_forbidden()
-    async with relationship_transaction(db, actor, post.author_id):
+    async with relationship_transaction(db, actor, post.author_id, pipeline=True):
         if not await can_view_post(db, actor, post.id):
             raise interaction_forbidden()
         await execute(
