@@ -81,14 +81,11 @@ LOCK_USER_QUERY = "SELECT id FROM users WHERE id = %(user_id)s FOR NO KEY UPDATE
 LOCK_ACTIVE_USER_QUERY = """
 SELECT id FROM users WHERE id = %(user_id)s AND status = 'active' FOR NO KEY UPDATE
 """
-# 複数ユーザーを 1 往復でロックする。ORDER BY の上で行をロックするので ID 順になり、
-# デッドロックしない
-LOCK_USERS_QUERY = """
-SELECT id FROM users WHERE id = ANY(%(user_ids)s) ORDER BY id FOR NO KEY UPDATE
-"""
-LOCK_ACTIVE_USERS_QUERY = """
-SELECT id FROM users WHERE id = ANY(%(user_ids)s) AND status = 'active'
-ORDER BY id FOR NO KEY UPDATE
+# 複数ユーザーの行を 1 往復で共有ロックする。FOR SHARE 同士はぶつからないので、
+# 同じユーザーに対する別々の操作は待ち合わない。退会（FOR NO KEY UPDATE）とはぶつかるので、
+# ロックしている間にユーザーが削除されることはない。ORDER BY の上でロックするので ID 順になる
+SHARE_LOCK_USERS_QUERY = """
+SELECT id FROM users WHERE id = ANY(%(user_ids)s) ORDER BY id FOR SHARE
 """
 
 
@@ -103,8 +100,8 @@ async def lock_user(db: Connection, user_id: str, *, active_only: bool = False) 
     return row is not None
 
 
-async def lock_users(db: Connection, user_ids: Iterable[str]) -> bool:
-    """複数ユーザーの行を 1 往復でロックする。1 人でも行がなければ False"""
+async def share_lock_users(db: Connection, user_ids: Iterable[str]) -> bool:
+    """複数ユーザーの行を 1 往復で共有ロックする。1 人でも行がなければ False"""
     ids = sorted(set(user_ids))
-    rows = await fetch_all(db, LOCK_USERS_QUERY, {"user_ids": ids})
+    rows = await fetch_all(db, SHARE_LOCK_USERS_QUERY, {"user_ids": ids})
     return len(rows) == len(ids)

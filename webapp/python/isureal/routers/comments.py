@@ -10,7 +10,7 @@ from ..db import DB, execute, fetch_one
 from ..errors import APIError, NoRowsError
 from ..models.comment import can_comment, get_comment, select_comments_with_author
 from ..models.post import get_post
-from ..models.user import get_user, lock_user, lock_users, valid_user_text
+from ..models.user import get_user, lock_user, share_lock_users, valid_user_text
 from ..schemas import CommentResponse, Page
 
 router = APIRouter(prefix="/api")
@@ -38,7 +38,8 @@ async def create_comment(
     if post is None:
         raise interaction_forbidden()
     async with db.transaction():
-        if not await lock_users(db, (actor, post.author_id)):
+        # 重複を防ぐ必要は無く、削除されていないことだけ守ればよいので共有ロックにする
+        if not await share_lock_users(db, (actor, post.author_id)):
             raise NoRowsError
         if not await can_comment(db, actor, post.id):
             raise interaction_forbidden()
