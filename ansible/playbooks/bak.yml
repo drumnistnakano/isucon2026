@@ -1,9 +1,11 @@
 ---
 # ベンチマーク前に、前回のログと集計を退避してから空にする（isucon-tools の bak.sh の複数台版）。
-# 退避したログは実行した PC の logs/<日時>/<ホスト名>/ にも取ってくる。
+# 退避したログは実行した PC の logs/<日時>[_job<ID>]/<ホスト名>/ にも取ってきて、
+# tools/bench_report.py で集計・gzip・meta.json 作成・logs/INDEX.md 更新まで行う。
 #
 # 使い方（必ず ansible/ ディレクトリで実行する）:
-#   ansible-playbook playbooks/bak.yml
+#   ansible-playbook playbooks/bak.yml                                  # ベンチ前
+#   ansible-playbook playbooks/bak.yml -e job_id=1234 -e score=5678     # ベンチ後（ポータルの値を渡す）
 #   ansible-playbook playbooks/bak.yml --limit 'asia1,localhost'   # 1台だけ
 #   ansible-playbook playbooks/bak.yml -e bak_fetch=false           # ローカルに取ってこない
 #
@@ -25,6 +27,10 @@
       ansible.builtin.set_fact:
         bak_ts: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
 
+    - name: ローカルの保存先ディレクトリ名を決める
+      ansible.builtin.set_fact:
+        bak_dir: "{{ bak_ts }}{{ ('_job' ~ job_id) if job_id is defined else '' }}"
+
 
 - name: DB 1台のログと集計を初期化する
   hosts: db
@@ -41,6 +47,10 @@
     - name: 退避ファイル名の日時を決める
       ansible.builtin.set_fact:
         bak_ts: "{{ hostvars['localhost']['bak_ts'] | default(lookup('pipe', 'date +%Y%m%d_%H%M%S')) }}"
+
+    - name: ローカルの保存先ディレクトリ名を決める
+      ansible.builtin.set_fact:
+        bak_dir: "{{ hostvars['localhost']['bak_dir'] | default(bak_ts ~ (('_job' ~ job_id) if job_id is defined else '')) }}"
 
     - name: 退避先のパスを決める
       ansible.builtin.set_fact:
@@ -85,7 +95,7 @@
       ansible.posix.synchronize:
         mode: pull
         src: "{{ pg_bak }}"
-        dest: "{{ local_dir }}/{{ bak_ts }}/{{ inventory_hostname }}/"
+        dest: "{{ local_dir }}/{{ bak_dir }}/{{ inventory_hostname }}/"
         rsync_path: sudo rsync
         rsync_opts:
           - "--mkpath"
@@ -100,7 +110,7 @@
       ansible.builtin.debug:
         msg: >-
           {{ inventory_hostname }}: {{ pg_bak }}{{
-          (' -> ' ~ local_dir ~ '/' ~ bak_ts ~ '/' ~ inventory_hostname ~ '/') if fetch else '' }}
+          (' -> ' ~ local_dir ~ '/' ~ bak_dir ~ '/' ~ inventory_hostname ~ '/') if fetch else '' }}
       when: pg_log_stat.stat.exists
 
 
@@ -119,9 +129,25 @@
       ansible.builtin.set_fact:
         bak_ts: "{{ hostvars['localhost']['bak_ts'] | default(lookup('pipe', 'date +%Y%m%d_%H%M%S')) }}"
 
+    - name: ローカルの保存先ディレクトリ名を決める
+      ansible.builtin.set_fact:
+        bak_dir: "{{ hostvars['localhost']['bak_dir'] | default(bak_ts ~ (('_job' ~ job_id) if job_id is defined else '')) }}"
+
     - name: 退避先のパスを決める
       ansible.builtin.set_fact:
         nginx_bak: "{{ nginx_log | dirname }}/backup/{{ nginx_log | basename }}.{{ bak_ts }}"
+
+    - name: デプロイ済みのコミットを確認
+      ansible.builtin.command:
+        cmd: cat /home/isucon/webapp/DEPLOYED_COMMIT
+      register: deployed_commit
+      changed_when: false
+      failed_when: false
+
+    - name: 集計スクリプトに渡すコミットを記録
+      ansible.builtin.set_fact:
+        commit_arg: "--commit={{ inventory_hostname }}={{ deployed_commit.stdout | trim }}"
+      when: deployed_commit.rc == 0
 
     - name: nginx のアクセスログがあるか確認
       ansible.builtin.stat:
@@ -154,7 +180,7 @@
       ansible.posix.synchronize:
         mode: pull
         src: "{{ nginx_bak }}"
-        dest: "{{ local_dir }}/{{ bak_ts }}/{{ inventory_hostname }}/"
+        dest: "{{ local_dir }}/{{ bak_dir }}/{{ inventory_hostname }}/"
         rsync_path: sudo rsync
         rsync_opts:
           - "--mkpath"
@@ -169,5 +195,32 @@
       ansible.builtin.debug:
         msg: >-
           {{ inventory_hostname }}: {{ nginx_bak }}{{
-          (' -> ' ~ local_dir ~ '/' ~ bak_ts ~ '/' ~ inventory_hostname ~ '/') if fetch else '' }}
+          (' -> ' ~ local_dir ~ '/' ~ bak_dir ~ '/' ~ inventory_hostname ~ '/') if fetch else '' }}
       when: nginx_log_stat.stat.exists
+
+
+- name: 取ってきたログを集計して meta.json と logs/INDEX.md を作る
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    repo: "{{ playbook_dir }}/../.."
+    fetch: "{{ bak_fetch | default(true) | bool }}"
+    commits: "{{ groups['app'] | map('extract', hostvars) | selectattr('commit_arg', 'defined') | map(attribute='commit_arg') | list }}"
+
+  tasks:
+    - name: 集計・gzip・meta.json・INDEX.md を作る
+      ansible.builtin.command:
+        argv: >-
+          {{ ['python3', '-I', repo ~ '/tools/bench_report.py', repo ~ '/logs/' ~ bak_dir]
+             + (['--job-id', job_id | string] if job_id is defined else [])
+             + (['--score', score | string] if score is defined else [])
+             + commits }}
+      register: report
+      when: fetch and bak_dir is defined
+
+    - name: meta.json を表示
+      ansible.builtin.debug:
+        msg: "{{ report.stdout | from_json }}"
+      when: report is not skipped

@@ -1,3 +1,5 @@
 # ansible/playbooks/bak.yml が取ってきた生ログ (logs/<日時>/<ホスト名>/)
 # 集計結果 (logs/<日時>/*.txt, *.md) だけをコミットする
 /logs/*/*/
+
+__pycache__/

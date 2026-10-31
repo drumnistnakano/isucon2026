@@ -177,31 +177,48 @@ done
 - **暖機運転はしない**。再起動後の初回ベンチをスコアとして記録する
 - 記録項目: 日時 / IP / コミット / netdata の有無 / slow log の状態 / score / success / fail / df / メモ
 
-### ベンチ前のログ初期化
+### ベンチ前後のログ初期化と記録
 
 ```bash
+# ベンチ前: 前回までのログを退避して空にする
 ansible-playbook playbooks/bak.yml
+
+# ベンチ実行 → ポータルでジョブ ID とスコアを確認
+
+# ベンチ後: ポータルの値を渡して、今回のログを取ってくる
+ansible-playbook playbooks/bak.yml -e job_id=1234 -e score=5678
 ```
 
 | 対象 | 内容 |
 |---|---|
 | アプリ3台 | `/var/log/nginx/access.log` を `/var/log/nginx/backup/access.log.<日時>` に退避して 0 バイトにする |
+| アプリ3台 | `~/webapp/DEPLOYED_COMMIT` を読む |
 | DB 1台 | `/var/log/postgresql/postgresql-16-main.log` を `/var/log/postgresql/backup/` に退避して 0 バイトにする |
 | DB 1台 | `pg_stat_statements_reset()` で集計をリセットする |
-| このPC | 退避したログを `logs/<日時>/<ホスト名>/` に取ってくる（`logs/` は `.gitignore` 済み） |
+| このPC | 退避したログを `logs/<日時>[_job<ID>]/<ホスト名>/` に取ってくる |
+| このPC | `tools/bench_report.py` で集計・gzip・`meta.json` 作成・`logs/INDEX.md` 更新 |
 
 ```text
-logs/20261031_130000/
-├── asia1/access.log.20261031_130000
-├── europe1/access.log.20261031_130000
-├── america1/access.log.20261031_130000
-└── asia2/postgresql-16-main.log.20261031_130000
+logs/
+├── INDEX.md                         # ベンチ一覧（logs/*/meta.json から自動生成）
+└── 20261031_130000_job1234/
+    ├── meta.json                    # ジョブ ID・スコア・コミット・ベンチ区間
+    ├── alp.txt                      # ベンチ区間の nginx 集計（alp が PATH に無ければ作らない）
+    ├── slow-queries.txt             # ベンチ区間の PostgreSQL クエリ集計
+    ├── asia1-access.log.gz          # nginx ログ全量
+    ├── asia2-postgresql.log.gz      # PostgreSQL ログ（DETAIL: parameters 行を除く）
+    ├── asia1/access.log.<日時>       # 生ログ（.gitignore 済み）
+    └── asia2/postgresql-16-main.log.<日時>
 ```
 
+- ベンチ区間は、アクセスログの最後の `POST /api/initialize` から最後のリクエストまで
+- `INDEX.md` の commit 欄は、アプリ3台の `DEPLOYED_COMMIT` が揃っていなければ `⚠️ 不一致` になる
+- 生ログ（`<ホスト名>/`）以外はコミットする。`INDEX.md` がコンフリクトしたら、`python3 tools/bench_report.py logs --index-only` で `meta.json` から作り直す
+- 取ってきた後に手で集計し直す場合: `python3 tools/bench_report.py logs/<ディレクトリ> [--job-id N] [--score N]`
 - サービスは再起動しない（nginx も PostgreSQL もログを追記モードで開いているため、truncate 後も書き込みは続く）
 - ローカルの main との一致は確認しないので、どのブランチからでも実行できる
-- ローカルに取ってこない場合は `-e bak_fetch=false`
-- `--limit` を使うときは `localhost` も含める（含めないと日時がホストごとに別になる）
+- ローカルに取ってこない場合は `-e bak_fetch=false`（集計もしない）
+- `--limit` を使うときは `localhost` も含める（含めないと日時がホストごとに別になり、集計も走らない）
 - サーバー側の退避ファイルは消さないので、溜まったら `df -h /` を見て手で消す
 
 ## 8. netdata の導入（全4台）
