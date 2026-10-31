@@ -73,6 +73,9 @@
   hosts: db
   gather_facts: false
 
+  vars_files:
+    - ../vars/pg_schema.yml
+
   vars:
     repo: "{{ playbook_dir }}/../.."
     remote_etc: /home/isucon/etc
@@ -143,6 +146,47 @@
       retries: 10
       delay: 2
       until: pg_ready.rc == 0
+      when: not dry_run
+
+    - name: 追加のインデックスを適用
+      # 001-schema.sql はリポジトリ内のどこからも実行されないため、稼働中の DB へは
+      # ここで流す。reset.sql も /api/initialize で同じものを作るが、initialize より先に
+      # リクエストが来ても困らないようにデプロイ時点で作っておく。
+      ansible.builtin.command:
+        argv:
+          - psql
+          - -X
+          - -v
+          - "ON_ERROR_STOP=1"
+          - -d
+          - "{{ pg_db }}"
+          - -c
+          - "{{ item.sql }}"
+      loop: "{{ pg_schema_ddl }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: true
+      become: true
+      become_user: postgres
+      when: not dry_run
+
+    - name: インデックスが作成されたか確認
+      ansible.builtin.command:
+        argv:
+          - psql
+          - -X
+          - -At
+          - -d
+          - "{{ pg_db }}"
+          - -c
+          - SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'users' ORDER BY indexname
+      register: pg_index_check
+      changed_when: false
+      failed_when: >-
+        pg_schema_ddl | map(attribute='name')
+        | difference(pg_index_check.stdout_lines) | list | length > 0
+      become: true
+      become_user: postgres
       when: not dry_run
 
     - name: 外部アドレスで待ち受けているか確認（conf.d の listen_addresses）

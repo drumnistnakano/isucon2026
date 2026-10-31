@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Request, Response
 
 from ..auth import CurrentSession
 from ..binding import RequestBody, json_body
-from ..db import DB, execute, fetch_one, fetch_value, from_row
+from ..db import DB, execute, fetch_one, from_row
 from ..errors import APIError, NoRowsError
 from ..models.session import create_login_session, invalidate_login_session
 from ..models.user import (
@@ -49,20 +49,15 @@ async def register(
         raise APIError(HTTPStatus.BAD_REQUEST, "invalid_registration")
     secret_key = str(uuid.uuid4())
     async with db.transaction():
-        # ユーザー名が一意である必要があります。
-        await execute(db, "LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE")
-        if await fetch_value(
-            db,
-            "SELECT EXISTS(SELECT 1 FROM users WHERE username = %(username)s)",
-            {"username": body.username},
-        ):
-            raise APIError(HTTPStatus.CONFLICT, "username_taken")
         user_id = str(uuid.uuid4())
-        await execute(
+        # ユーザー名が一意である必要があります。users_username の一意インデックスに任せる。
+        # テーブル全体をロックすると他の書き込みまで待たされるため、競合時だけ失敗させる。
+        inserted = await execute(
             db,
             """
             INSERT INTO users (id, username, secret_key_hash, display_name, region)
             VALUES (%(id)s, %(username)s, %(secret_key_hash)s, %(display_name)s, %(region)s)
+            ON CONFLICT (username) DO NOTHING
             """,
             {
                 "id": user_id,
@@ -72,6 +67,8 @@ async def register(
                 "region": body.region,
             },
         )
+        if inserted == 0:
+            raise APIError(HTTPStatus.CONFLICT, "username_taken")
         user = await get_user(db, user_id)
         if user is None:
             raise NoRowsError
