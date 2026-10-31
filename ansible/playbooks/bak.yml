@@ -66,9 +66,11 @@
       become: true
       when: pg_log_stat.stat.exists
 
+    # /var/log/postgresql は sticky + group 書き込み可。fs.protected_regular=2 だと
+    # root でも O_CREAT 付きで開けないため、-c (--no-create) を付ける
     - name: PostgreSQL のログを空にする
       ansible.builtin.command:
-        cmd: truncate -s 0 {{ pg_log }}
+        cmd: truncate -c -s 0 {{ pg_log }}
       become: true
       when: pg_log_stat.stat.exists
 
@@ -143,7 +145,7 @@
 
     - name: nginx のアクセスログを空にする
       ansible.builtin.command:
-        cmd: truncate -s 0 {{ nginx_log }}
+        cmd: truncate -c -s 0 {{ nginx_log }}
       become: true
       when: nginx_log_stat.stat.exists
 
