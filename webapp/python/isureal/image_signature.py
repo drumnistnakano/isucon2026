@@ -1,6 +1,5 @@
 import base64
 import hashlib
-import hmac
 import logging
 import os
 import sqlite3
@@ -94,14 +93,32 @@ def image_signing_key(secret_key_hash: str) -> bytes:
     return key
 
 
+def hmac_chain(key: bytes, value: bytes, iterations: int) -> bytes:
+    """HMAC-SHA256 を同じ鍵で iterations 回つなげる (hmac.digest を繰り返した結果と同じ)
+
+    ipad/opad を処理した直後のハッシュ状態を使い回し、毎回の圧縮を 4 回から 2 回に減らす。
+    """
+    block = hashlib.sha256().block_size
+    if len(key) > block:
+        key = hashlib.sha256(key).digest()
+    key = key.ljust(block, b"\0")
+    inner0 = hashlib.sha256(bytes(b ^ 0x36 for b in key))
+    outer0 = hashlib.sha256(bytes(b ^ 0x5C for b in key))
+    for _ in range(iterations):
+        inner = inner0.copy()
+        inner.update(value)
+        outer = outer0.copy()
+        outer.update(inner.digest())
+        value = outer.digest()
+    return value
+
+
 @lru_cache(maxsize=IMAGE_SIGNATURE_CACHE_SIZE)
 def image_signature(key: bytes, image_id: str, exp: int) -> bytes:
     stored = _signature_store.get(key, image_id, exp)
     if stored is not None:
         return stored
-    value = f"{exp}:{image_id}".encode()
-    for _ in range(IMAGE_SIGNATURE_ITERATIONS):
-        value = hmac.digest(key, value, "sha256")
+    value = hmac_chain(key, f"{exp}:{image_id}".encode(), IMAGE_SIGNATURE_ITERATIONS)
     # 発行した期限の形だけ保存し、攻撃で送られた任意の exp では増やさない
     if exp % IMAGE_URL_EXP_STEP == 0:
         _signature_store.put(key, image_id, exp, value)
