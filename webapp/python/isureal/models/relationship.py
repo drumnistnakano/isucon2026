@@ -1,9 +1,10 @@
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from http import HTTPStatus
+from typing import Any
 
 from ..db import Connection, execute, fetch_all, fetch_one, fetch_value, from_row
 from ..errors import APIError
@@ -73,28 +74,29 @@ async def insert_friendship(db: Connection, request: FriendRequest) -> None:
     )
 
 
-async def get_friend_ids(db: Connection, user_id: str) -> list[str]:
-    rows = await fetch_all(
-        db,
-        """
-        SELECT user_low_id, user_high_id FROM friendships
-        WHERE user_low_id = %(user_id)s OR user_high_id = %(user_id)s
-        """,
-        {"user_id": user_id},
-    )
+FRIEND_PAIRS_QUERY = """
+SELECT user_low_id, user_high_id FROM friendships
+WHERE user_low_id = %(user_id)s OR user_high_id = %(user_id)s
+"""
+
+BLOCKED_USER_IDS_QUERY = """
+SELECT CASE WHEN blocker_id = %(user_id)s THEN blocked_id ELSE blocker_id END AS id
+FROM block_relations WHERE blocker_id = %(user_id)s OR blocked_id = %(user_id)s
+"""
+
+
+def friend_ids_from_pairs(rows: Iterable[Mapping[str, Any]], user_id: str) -> list[str]:
     return [
         row["user_high_id"] if row["user_low_id"] == user_id else row["user_low_id"]
         for row in rows
     ]
 
 
+async def get_friend_ids(db: Connection, user_id: str) -> list[str]:
+    rows = await fetch_all(db, FRIEND_PAIRS_QUERY, {"user_id": user_id})
+    return friend_ids_from_pairs(rows, user_id)
+
+
 async def get_blocked_user_ids(db: Connection, user_id: str) -> set[str]:
-    rows = await fetch_all(
-        db,
-        """
-        SELECT CASE WHEN blocker_id = %(user_id)s THEN blocked_id ELSE blocker_id END AS id
-        FROM block_relations WHERE blocker_id = %(user_id)s OR blocked_id = %(user_id)s
-        """,
-        {"user_id": user_id},
-    )
+    rows = await fetch_all(db, BLOCKED_USER_IDS_QUERY, {"user_id": user_id})
     return {row["id"] for row in rows}

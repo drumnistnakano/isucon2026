@@ -66,13 +66,17 @@ class User:
         return self.signed_image_url(self.profile_image_id)
 
 
+ACTIVE_USER_QUERY = (
+    f"SELECT {user_columns()} FROM users WHERE id = %(user_id)s AND status = 'active'"
+)
+
+
 async def get_user(db: Connection, user_id: str) -> User | None:
-    row = await fetch_one(
-        db,
-        f"SELECT {user_columns()} FROM users WHERE id = %(id)s AND status = 'active'",
-        {"id": user_id},
-    )
+    row = await fetch_one(db, ACTIVE_USER_QUERY, {"user_id": user_id})
     return from_row(User, row) if row else None
+
+
+LOCK_USER_QUERY = "SELECT id FROM users WHERE id = %(user_id)s FOR NO KEY UPDATE"
 
 
 async def lock_user(db: Connection, user_id: str, *, active_only: bool = False) -> bool:
