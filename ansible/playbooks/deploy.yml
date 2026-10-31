@@ -12,8 +12,12 @@
 # 送るもの:
 #   webapp/python/        -> アプリ3台 /home/isucon/webapp/python/
 #   webapp/sql/           -> アプリ3台 /home/isucon/webapp/sql/
-#   etc/nginx/            -> アプリ3台 /home/isucon/etc/nginx/（/etc/nginx/nginx.conf から symlink）
-#   etc/postgresql/       -> DB 1台 /etc/postgresql/16/main/postgresql.conf
+#   etc/nginx/            -> アプリ3台 /home/isucon/etc/nginx/
+#   etc/postgresql/       -> DB 1台 /home/isucon/etc/postgresql/
+#
+# 反映先の /etc はリポジトリの etc/ を指す symlink にする:
+#   /etc/nginx/nginx.conf                    -> /home/isucon/etc/nginx/nginx.conf
+#   /etc/postgresql/16/main/postgresql.conf  -> /home/isucon/etc/postgresql/16/main/postgresql.conf
 #
 # 再起動は毎回行う（DB 再起動で切れた接続をアプリ側で張り直すため、DB -> アプリの順）。
 
@@ -71,10 +75,14 @@
 
   vars:
     repo: "{{ playbook_dir }}/../.."
-    remote_pg_conf: /etc/postgresql/16/main/postgresql.conf
+    remote_etc: /home/isucon/etc
+    pg_conf: /etc/postgresql/16/main/postgresql.conf
     dry_run: "{{ rsync_dry_run | default(false) | bool }}"
     deploy_sha: "{{ hostvars['localhost']['deploy_sha'] | default('') }}"
     deploy_short: "{{ deploy_sha[:7] }}"
+    rsync_excludes:
+      - "--exclude=._*"
+    rsync_opts: "{{ rsync_excludes + (['--dry-run'] if dry_run else []) }}"
 
   tasks:
     - name: ローカル確認の play が実行されているか確認
@@ -85,15 +93,21 @@
           ローカル確認の play が実行されていない。--limit を使う場合は
           localhost も含めること（例: --limit 'asia1,localhost'）。
 
-    - name: PostgreSQL 設定を配置
-      ansible.builtin.copy:
-        src: "{{ repo }}/etc/postgresql/16/main/postgresql.conf"
-        dest: "{{ remote_pg_conf }}"
-        owner: postgres
-        group: postgres
-        mode: "0644"
+    - name: PostgreSQL 設定を同期
+      ansible.posix.synchronize:
+        src: "{{ repo }}/etc/postgresql/"
+        dest: "{{ remote_etc }}/postgresql/"
+        delete: true
+        rsync_opts: "{{ rsync_opts }}"
+
+    - name: /etc の設定ファイルを配布物への symlink にする
+      ansible.builtin.file:
+        src: "{{ remote_etc }}/postgresql/16/main/postgresql.conf"
+        dest: "{{ pg_conf }}"
+        state: link
+        force: true
       become: true
-      check_mode: "{{ dry_run }}"
+      when: not dry_run
 
     - name: PostgreSQL を再起動
       ansible.builtin.systemd:
@@ -118,6 +132,14 @@
       retries: 10
       delay: 2
       until: pg_ready.rc == 0
+      when: not dry_run
+
+    - name: 外部アドレスで待ち受けているか確認（conf.d の listen_addresses）
+      ansible.builtin.command:
+        cmd: ss -ltn
+      register: pg_listen
+      changed_when: false
+      failed_when: "'0.0.0.0:5432' not in pg_listen.stdout"
       when: not dry_run
 
     - name: 直近のログに PANIC が出ていないか確認
@@ -187,11 +209,20 @@
         - not dry_run
         - python_sync.changed
 
-    - name: nginx 設定の構文を確認
+    - name: nginx 設定の構文を確認（配布したファイルを直接検証）
       ansible.builtin.command:
-        cmd: nginx -t
+        cmd: nginx -t -c {{ remote_etc }}/nginx/nginx.conf
       become: true
       changed_when: false
+      when: not dry_run
+
+    - name: /etc/nginx/nginx.conf を配布物への symlink にする
+      ansible.builtin.file:
+        src: "{{ remote_etc }}/nginx/nginx.conf"
+        dest: /etc/nginx/nginx.conf
+        state: link
+        force: true
+      become: true
       when: not dry_run
 
     - name: デプロイしたコミットを記録

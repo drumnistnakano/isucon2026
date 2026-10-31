@@ -8,8 +8,12 @@ main ブランチの内容を **アプリ3台（asia1 / europe1 / america1）** 
 - リポジトリ全体は送らない。送るのは次の4つだけ。
   - `webapp/python/` → アプリ3台 `/home/isucon/webapp/python/`
   - `webapp/sql/` → アプリ3台 `/home/isucon/webapp/sql/`
-  - `etc/nginx/` → アプリ3台 `/home/isucon/etc/nginx/`（`/etc/nginx/nginx.conf` はここへの symlink）
-  - `etc/postgresql/` → DB 1台 `/etc/postgresql/16/main/postgresql.conf`
+  - `etc/nginx/` → アプリ3台 `/home/isucon/etc/nginx/`
+  - `etc/postgresql/` → DB 1台 `/home/isucon/etc/postgresql/`
+- 反映先の `/etc` はリポジトリの `etc/` を指す **symlink**。playbook が毎回この形に揃える。
+  - `/etc/nginx/nginx.conf` → `/home/isucon/etc/nginx/nginx.conf`
+  - `/etc/postgresql/16/main/postgresql.conf` → `/home/isucon/etc/postgresql/16/main/postgresql.conf`
+- `etc/` は `webapp/` の隣（リポジトリ直下）。`webapp/` の中には無い。
 
 ## 1. 構成
 
@@ -111,9 +115,10 @@ DB 設定を先に反映し、そのあとアプリを再起動する（DB 再�
 
 | # | タスク | 内容 |
 |---|---|---|
-| 1 | 設定の配置 | `etc/postgresql/16/main/postgresql.conf` → `/etc/postgresql/16/main/postgresql.conf`（`become`。dry-run では check mode） |
-| 2 | 再起動 | `systemctl restart postgresql`（`become`） |
-| 3 | 検証 | `is-active postgresql` / `pg_isready -h 127.0.0.1 -p 5432` / ログに `PANIC` が無い |
+| 1 | 設定の同期 | `etc/postgresql/` → `/home/isucon/etc/postgresql/`（`--delete`） |
+| 2 | symlink 作成 | `/etc/postgresql/16/main/postgresql.conf` → `/home/isucon/etc/postgresql/16/main/postgresql.conf`（`become`） |
+| 3 | 再起動 | `systemctl restart postgresql`（`become`） |
+| 4 | 検証 | `is-active postgresql` / `pg_isready -h 127.0.0.1 -p 5432` / `ss -ltn` に `0.0.0.0:5432` がある / ログに `PANIC` が無い |
 
 ### アプリ3台（asia1 / europe1 / america1、1台ずつ）
 
@@ -124,10 +129,11 @@ DB 設定を先に反映し、そのあとアプリを再起動する（DB 再�
 | 3 | SQL 同期 | `webapp/sql/` → `/home/isucon/webapp/sql/`（`--delete`） |
 | 4 | nginx 設定同期 | `etc/nginx/` → `/home/isucon/etc/nginx/`（`--delete`） |
 | 5 | 依存関係の同期 | python に変更があったホストだけ `uv sync --frozen --no-dev` を実行 |
-| 6 | nginx 設定の検証 | `nginx -t`（`become`）。構文エラーなら再起動せずに止まる |
-| 7 | 版の記録 | `/home/isucon/webapp/DEPLOYED_COMMIT` に SHA を書き込む |
-| 8 | 再起動 | `systemctl restart isureal-python` → `systemctl restart nginx`（`become`） |
-| 9 | 検証 | `is-active`（アプリ・nginx）/ `127.0.0.1:8080` の応答 / `DEPLOYED_COMMIT` の一致 / `journalctl` に `Traceback` が無い |
+| 6 | nginx 設定の検証 | `nginx -t -c /home/isucon/etc/nginx/nginx.conf`（`become`）。壊れていれば symlink を差し替えずに止まる |
+| 7 | symlink 作成 | `/etc/nginx/nginx.conf` → `/home/isucon/etc/nginx/nginx.conf`（`become`） |
+| 8 | 版の記録 | `/home/isucon/webapp/DEPLOYED_COMMIT` に SHA を書き込む |
+| 9 | 再起動 | `systemctl restart isureal-python` → `systemctl restart nginx`（`become`） |
+| 10 | 検証 | `is-active`（アプリ・nginx）/ `127.0.0.1:8080` の応答 / `DEPLOYED_COMMIT` の一致 / `journalctl` に `Traceback` が無い |
 
 ### 送らないもの（意図的）
 
@@ -186,8 +192,14 @@ main を配るだけなので、戻す操作もデプロイと同じ1コマン�
 - `inventory.ini` の IP が古いと別スタックへ配ってしまう。再構築したら `inventory.ini` を更新する
 - `--delete` を使うので、除外指定（`.venv/` など）を消さないこと
 - サーバ側で直接ファイルを編集しない。次のデプロイで上書きされる
-  （`/etc/nginx/nginx.conf` は `~/etc/nginx/nginx.conf` への symlink、
-  `postgresql.conf` は毎回 `copy` で上書きされる）
+  - `/etc/nginx/nginx.conf` → `~/etc/nginx/nginx.conf` への symlink
+  - `/etc/postgresql/16/main/postgresql.conf` → `~/etc/postgresql/16/main/postgresql.conf` への symlink
+- **初回だけ `/etc` の実ファイルが symlink に置き換わる**（`force: true`）。asia2 の
+  `postgresql.conf` と、europe1 / america1 の既定 `nginx.conf` がこれに当たる。
+  置き換え後の内容はリポジトリの `etc/` と同じになる
+- `postgresql.conf` の `include_dir = 'conf.d'` は `/etc/postgresql/16/main/conf.d` を指す
+  （相対パスは参照元ファイルの位置を基準に解決される）。`conf.d/isucon.conf` の
+  `listen_addresses = '*'` はそのまま有効
 
 ## 10. トラブルシュート
 
