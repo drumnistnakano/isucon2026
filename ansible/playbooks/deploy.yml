@@ -1,0 +1,148 @@
+---
+# main ブランチの内容をアプリ3台（asia1 / europe1 / america1）へデプロイする。
+#
+# 使い方（必ず ansible/ ディレクトリで実行する）:
+#   ansible-playbook playbooks/deploy.yml                       # 本番デプロイ
+#   ansible-playbook playbooks/deploy.yml -e rsync_dry_run=true # 転送内容の確認だけ
+#   ansible-playbook playbooks/deploy.yml --limit asia1         # 1台だけ先行
+#
+# 前提: ローカルの main が origin/main と一致し、webapp/ に未コミット変更が無いこと。
+#       条件を満たさない場合は何も変更せずに失敗する。
+
+- name: アプリ3台へデプロイする
+  hosts: app
+  serial: 1          # 1台ずつ。クロスリージョンの回線を奪い合わない
+  gather_facts: false
+
+  vars:
+    repo: "{{ playbook_dir }}/../.."
+    remote_webapp: /home/isucon/webapp
+    dry_run: "{{ rsync_dry_run | default(false) | bool }}"
+    rsync_excludes:
+      - "--exclude=.venv/"
+      - "--exclude=__pycache__/"
+      - "--exclude=._*"
+    rsync_opts: "{{ rsync_excludes + (['--dry-run'] if dry_run else []) }}"
+
+  pre_tasks:
+    # --- ここからローカル（このPC）の確認。1回だけ実行する ---
+    - name: origin を取得
+      ansible.builtin.command:
+        cmd: git -C {{ repo }} fetch --prune origin
+      delegate_to: localhost
+      run_once: true
+      changed_when: false
+
+    - name: origin/main の SHA を取得
+      ansible.builtin.command:
+        cmd: git -C {{ repo }} rev-parse origin/main
+      delegate_to: localhost
+      run_once: true
+      register: origin_main
+      changed_when: false
+
+    - name: ローカル HEAD の SHA を取得
+      ansible.builtin.command:
+        cmd: git -C {{ repo }} rev-parse HEAD
+      delegate_to: localhost
+      run_once: true
+      register: local_head
+      changed_when: false
+
+    - name: webapp に未コミットの変更が無いことを確認
+      ansible.builtin.command:
+        cmd: git -C {{ repo }} status --porcelain -- webapp
+      delegate_to: localhost
+      run_once: true
+      register: webapp_dirty
+      changed_when: false
+      failed_when: webapp_dirty.stdout | length > 0
+
+    - name: HEAD が origin/main と一致することを確認
+      ansible.builtin.assert:
+        that:
+          - local_head.stdout == origin_main.stdout
+        fail_msg: >-
+          HEAD ({{ local_head.stdout[:7] }}) が origin/main ({{ origin_main.stdout[:7] }}) と違う。
+          main に切り替えて git pull してからデプロイすること。
+        success_msg: "デプロイ対象: {{ origin_main.stdout[:7] }}"
+      delegate_to: localhost
+      run_once: true
+
+  tasks:
+    - name: python 実装を同期
+      ansible.posix.synchronize:
+        src: "{{ repo }}/webapp/python/"
+        dest: "{{ remote_webapp }}/python/"
+        delete: true
+        rsync_opts: "{{ rsync_opts }}"
+      notify: isureal-python を再起動
+
+    - name: SQL 定義を同期
+      ansible.posix.synchronize:
+        src: "{{ repo }}/webapp/sql/"
+        dest: "{{ remote_webapp }}/sql/"
+        delete: true
+        rsync_opts: "{{ rsync_opts }}"
+      notify: isureal-python を再起動
+
+    - name: デプロイしたコミットを記録
+      ansible.builtin.copy:
+        content: "{{ origin_main.stdout }}\n"
+        dest: "{{ remote_webapp }}/DEPLOYED_COMMIT"
+        mode: "0644"
+      when: not dry_run
+
+    # 検証より先に再起動を済ませる（ハンドラは通常 play の最後に走るため）
+    - name: 再起動をここで実行
+      ansible.builtin.meta: flush_handlers
+
+    - name: サービスが起動しているか確認
+      ansible.builtin.command:
+        cmd: systemctl is-active isureal-python
+      register: svc
+      changed_when: false
+      failed_when: svc.stdout | trim != "active"
+      when: not dry_run
+
+    - name: アプリが応答するか確認（404 が返ればプロセスは生きている）
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8080/
+        status_code: 404
+        timeout: 5
+      register: health
+      retries: 10
+      delay: 2
+      until: health.status is defined and health.status == 404
+      when: not dry_run
+
+    - name: 記録したコミットが期待どおりか確認
+      ansible.builtin.command:
+        cmd: cat {{ remote_webapp }}/DEPLOYED_COMMIT
+      register: deployed
+      changed_when: false
+      when: not dry_run
+
+    - name: デプロイ結果を検証
+      ansible.builtin.assert:
+        that:
+          - deployed.stdout | trim == origin_main.stdout
+        fail_msg: "DEPLOYED_COMMIT ({{ deployed.stdout | trim }}) が期待値 ({{ origin_main.stdout }}) と違う"
+        success_msg: "{{ inventory_hostname }}: {{ origin_main.stdout[:7] }} を適用済み"
+      when: not dry_run
+
+    - name: 直近のログに例外が出ていないか確認
+      ansible.builtin.command:
+        cmd: journalctl -u isureal-python -n 30 --no-pager
+      register: applog
+      changed_when: false
+      failed_when: "'Traceback' in applog.stdout"
+      when: not dry_run
+
+  handlers:
+    - name: isureal-python を再起動
+      ansible.builtin.systemd:
+        name: isureal-python
+        state: restarted
+      become: true
+      when: not dry_run
