@@ -170,6 +170,9 @@ CREATE TABLE posts (
   deleted_at timestamptz
 );
 CREATE INDEX posts_author_id ON posts(author_id);
+-- エクスポートは author 単位で posted_at 順に全件読む。単独の author_id だと
+-- 625k 行の Seq Scan + Sort が選ばれてしまうため、並びまで含めた索引にする
+CREATE INDEX posts_author_id_posted_at ON posts(author_id, posted_at, id);
 CREATE INDEX posts_posting_window_id ON posts(posting_window_id);
 
 CREATE TABLE friend_requests (

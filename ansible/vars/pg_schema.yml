@@ -11,3 +11,5 @@ pg_db: isureal
 pg_schema_ddl:
   - name: users_username
     sql: CREATE UNIQUE INDEX IF NOT EXISTS users_username ON users(username)
+  - name: posts_author_id_posted_at
+    sql: CREATE INDEX IF NOT EXISTS posts_author_id_posted_at ON posts(author_id, posted_at, id)
