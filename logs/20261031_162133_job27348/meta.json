@@ -1,0 +1,21 @@
+{
+  "dir": "20261031_162133_job27348",
+  "fetched_at": "2026-10-31 16:21:33",
+  "hosts": [
+    "america1",
+    "asia1",
+    "asia2",
+    "europe1"
+  ],
+  "job_id": "27348",
+  "score": "20134",
+  "commits": {
+    "asia1": "b0ac605f2da9ebf53c162ba82ae4c18be59b1e59",
+    "europe1": "b0ac605f2da9ebf53c162ba82ae4c18be59b1e59",
+    "america1": "b0ac605f2da9ebf53c162ba82ae4c18be59b1e59"
+  },
+  "bench_window_utc": {
+    "start": "2026-10-31 07:17:25",
+    "end": "2026-10-31 07:18:56"
+  }
+}
