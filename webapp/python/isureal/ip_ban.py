@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,6 +14,8 @@ from .timeutil import now
 
 RELOAD_INTERVAL = 0.2
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True, slots=True)
 class IPBanSnapshot:
@@ -23,18 +27,35 @@ class IPBanList:
     def __init__(self) -> None:
         self.snapshot: IPBanSnapshot | None = None
         self.reloading = False
+        self.reload_task: asyncio.Task[None] | None = None
+
+    async def _reload(self, pool: Pool) -> None:
+        self.reloading = True
+        try:
+            self.snapshot = await load_ip_bans(pool)
+        finally:
+            self.reloading = False
+
+    async def _reload_in_background(self, pool: Pool) -> None:
+        try:
+            await self._reload(pool)
+        except Exception:
+            # 古い一覧のまま続け、次のリクエストで読み直す
+            logger.exception("failed to reload ip bans")
 
     async def banned(self, pool: Pool, ip: str) -> bool:
         snapshot = self.snapshot
-        stale = (
-            snapshot is None or time.monotonic() - snapshot.loaded_at >= RELOAD_INTERVAL
-        )
-        if stale and not self.reloading:
+        if snapshot is None:
+            if not self.reloading:
+                await self._reload(pool)
+                snapshot = self.snapshot
+        elif (
+            time.monotonic() - snapshot.loaded_at >= RELOAD_INTERVAL
+            and not self.reloading
+        ):
+            # リージョンをまたぐと1往復が重いので、リクエストを待たせずに読み直す
             self.reloading = True
-            try:
-                snapshot = self.snapshot = await load_ip_bans(pool)
-            finally:
-                self.reloading = False
+            self.reload_task = asyncio.create_task(self._reload_in_background(pool))
         if snapshot is None:
             return False
         until = snapshot.bans.get(ip)
