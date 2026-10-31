@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator
 from datetime import datetime
 
@@ -16,12 +17,15 @@ router = APIRouter(prefix="/api/notifications")
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL = 0.5
+# nginx の proxy_read_timeout（既定60秒）で切られないよう、待機中も定期的に送る
+HEARTBEAT_INTERVAL = 10.0
 
 
 async def notification_events(
     pool: Pool, session: Session, connected_at: datetime
 ) -> AsyncIterator[bytes]:
     """接続後に届いた通知を 1 件送って終わる"""
+    last_heartbeat = time.monotonic()
     while True:
         try:
             async with pool.connection() as db:
@@ -47,6 +51,11 @@ async def notification_events(
             notification = NotificationResponse(**row)
             yield b"data: " + notification.model_dump_json().encode() + b"\n\n"
             return
+        now = time.monotonic()
+        if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+            # SSE のコメント行。クライアントは無視する
+            yield b": keepalive\n\n"
+            last_heartbeat = now
         await asyncio.sleep(POLL_INTERVAL)
 
 
@@ -58,4 +67,5 @@ async def get_notifications(
     return StreamingResponse(
         notification_events(request.app.state.pool, session, connected_at),
         media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
