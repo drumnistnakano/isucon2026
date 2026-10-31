@@ -4,9 +4,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from ..db import Connection, Params, fetch_all, fetch_one, fetch_value, from_row
-from .relationship import get_blocked_user_ids, get_friend_ids
-from .user import User, get_user, user_columns, valid_user_text
+from ..db import Connection, Params, fetch_all, fetch_one, from_row
+from ..errors import NoRowsError
+from .relationship import (
+    BLOCKED_USER_IDS_QUERY,
+    FRIEND_PAIRS_QUERY,
+    friend_ids_from_pairs,
+)
+from .user import ACTIVE_USER_QUERY, User, user_columns, valid_user_text
 
 VISIBILITIES = frozenset({"friends", "friends_of_friends", "public"})
 
@@ -161,39 +166,56 @@ class Viewer:
                 return False
 
 
+HAS_POSTED_TODAY_QUERY = """
+SELECT EXISTS(
+  SELECT 1 FROM posts p
+  JOIN posting_windows posted ON posted.id = p.posting_window_id
+  JOIN users viewer ON viewer.id = %(user_id)s
+  JOIN posting_windows current ON current.region = viewer.region AND current.ended_at IS NULL
+                              AND current.local_date = posted.local_date
+  WHERE p.author_id = %(user_id)s AND p.deleted_at IS NULL
+) AS has_posted
+"""
+
+FRIENDS_NETWORK_QUERY = """
+WITH viewer_friends AS (
+  SELECT CASE WHEN user_low_id = %(user_id)s THEN user_high_id ELSE user_low_id END AS id
+  FROM friendships WHERE user_low_id = %(user_id)s OR user_high_id = %(user_id)s
+)
+SELECT user_low_id, user_high_id FROM friendships
+WHERE user_low_id IN (SELECT id FROM viewer_friends)
+UNION
+SELECT user_low_id, user_high_id FROM friendships
+WHERE user_high_id IN (SELECT id FROM viewer_friends)
+"""
+
+
 async def load_viewer(db: Connection, viewer_id: str) -> Viewer | None:
-    user = await get_user(db, viewer_id)
-    if user is None:
+    params = {"user_id": viewer_id}
+    # リージョンをまたぐと1往復が重いので、1回の通信でまとめて問い合わせる
+    async with db.pipeline():
+        user_cursor = await db.execute(ACTIVE_USER_QUERY, params)
+        posted_cursor = await db.execute(HAS_POSTED_TODAY_QUERY, params)
+        blocked_cursor = await db.execute(BLOCKED_USER_IDS_QUERY, params)
+        friends_cursor = await db.execute(FRIEND_PAIRS_QUERY, params)
+        network_cursor = await db.execute(FRIENDS_NETWORK_QUERY, params)
+    user_row = await user_cursor.fetchone()
+    if user_row is None:
         return None
-    has_posted_today: bool = await fetch_value(
-        db,
-        """
-        SELECT EXISTS(
-          SELECT 1 FROM posts p
-          JOIN posting_windows posted ON posted.id = p.posting_window_id
-          JOIN posting_windows current ON current.region = %(region)s AND current.ended_at IS NULL
-                                      AND current.local_date = posted.local_date
-          WHERE p.author_id = %(user_id)s AND p.deleted_at IS NULL
-        )
-        """,
-        {"user_id": user.id, "region": user.region},
-    )
+    posted_row = await posted_cursor.fetchone()
+    if posted_row is None:
+        raise NoRowsError
     viewer = Viewer(
-        user=user,
-        has_posted_today=has_posted_today,
-        blocked=await get_blocked_user_ids(db, user.id),
+        user=from_row(User, user_row),
+        has_posted_today=posted_row["has_posted"],
+        blocked={row["id"] for row in await blocked_cursor.fetchall()},
     )
-    viewer.friends = set(await get_friend_ids(db, user.id))
+    viewer.friends = set(
+        friend_ids_from_pairs(await friends_cursor.fetchall(), viewer_id)
+    )
     if not viewer.friends:
         return viewer
-    friendships = await fetch_all(
-        db,
-        """
-        SELECT user_low_id, user_high_id FROM friendships
-        WHERE user_low_id = ANY(%(ids)s) OR user_high_id = ANY(%(ids)s)
-        """,
-        {"ids": list(viewer.friends)},
-    )
+    friendships = await network_cursor.fetchall()
     for friendship in friendships:
         low, high = friendship["user_low_id"], friendship["user_high_id"]
         if low in viewer.friends:

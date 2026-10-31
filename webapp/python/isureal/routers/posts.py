@@ -3,11 +3,10 @@ from http import HTTPStatus
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response
-from psycopg.rows import DictRow
 
 from ..auth import RegionalSession
 from ..binding import Form, RequestBody, form_body, json_body
-from ..db import DB, Connection, execute, fetch_one, fetch_value, from_row
+from ..db import DB, execute, fetch_one, fetch_value, from_row
 from ..errors import APIError, NoRowsError
 from ..jpeg import valid_jpeg
 from ..models.post import (
@@ -18,7 +17,14 @@ from ..models.post import (
     load_viewer,
 )
 from ..models.posting_window import PostingWindow, get_posting_window
-from ..models.user import get_user, lock_user, valid_user_text
+from ..models.user import (
+    ACTIVE_USER_QUERY,
+    LOCK_USER_QUERY,
+    User,
+    get_user,
+    lock_user,
+    valid_user_text,
+)
 from ..schemas import CurrentPostingWindowResponse, PostingWindowResponse, PostResponse
 from ..timeutil import now
 
@@ -37,15 +43,21 @@ def post_slot_unavailable() -> APIError:
     return APIError(HTTPStatus.CONFLICT, "post_slot_unavailable")
 
 
-async def lock_current_window(db: Connection, region: str) -> DictRow | None:
-    return await fetch_one(
-        db,
-        """
-        SELECT id, local_date, starts_at FROM posting_windows
-        WHERE region = %(region)s AND ended_at IS NULL FOR SHARE
-        """,
-        {"region": region},
-    )
+LOCK_USER_WINDOW_QUERY = """
+SELECT id, local_date, starts_at FROM posting_windows
+WHERE region = (SELECT region FROM users WHERE id = %(user_id)s)
+  AND ended_at IS NULL FOR SHARE
+"""
+
+USER_WINDOW_POST_COUNTS_QUERY = """
+SELECT count(*) FILTER (WHERE deleted_at IS NULL) AS active,
+       count(*) FILTER (WHERE deleted_at IS NOT NULL) AS deleted
+FROM posts p JOIN posting_windows w ON w.id = p.posting_window_id
+WHERE p.author_id = %(user_id)s AND w.local_date = (
+  SELECT local_date FROM posting_windows
+  WHERE region = (SELECT region FROM users WHERE id = %(user_id)s) AND ended_at IS NULL
+)
+"""
 
 
 @router.post("/posts", status_code=HTTPStatus.CREATED)
@@ -73,28 +85,29 @@ async def create_post(
         raise APIError(HTTPStatus.BAD_REQUEST, "invalid_post")
 
     user_id = session.user_id
-    async with db.transaction():
-        if not await lock_user(db, user_id):
+    params = {"user_id": user_id}
+    # リージョンをまたぐと往復が重く、ユーザーのロックも長くなるのでまとめて送る
+    async with db.pipeline(), db.transaction():
+        locked_cursor = await db.execute(LOCK_USER_QUERY, params)
+        user_cursor = await db.execute(ACTIVE_USER_QUERY, params)
+        window_cursor = await db.execute(LOCK_USER_WINDOW_QUERY, params)
+        counts_cursor = await db.execute(USER_WINDOW_POST_COUNTS_QUERY, params)
+        if await locked_cursor.fetchone() is None:
             raise NoRowsError
-        user = await get_user(db, user_id)
-        if user is None:
+        user_row = await user_cursor.fetchone()
+        if user_row is None:
             raise NoRowsError
-        window = await lock_current_window(db, user.region)
+        user = from_row(User, user_row)
+        window = await window_cursor.fetchone()
+        counts = await counts_cursor.fetchone()
         if window is None:
             # 窓の切り替えを待った直後は新しい窓が見えないので、もう一度探す
-            window = await lock_current_window(db, user.region)
+            window_cursor = await db.execute(LOCK_USER_WINDOW_QUERY, params)
+            counts_cursor = await db.execute(USER_WINDOW_POST_COUNTS_QUERY, params)
+            window = await window_cursor.fetchone()
+            counts = await counts_cursor.fetchone()
         if window is None:
             raise post_slot_unavailable()
-        counts = await fetch_one(
-            db,
-            """
-            SELECT count(*) FILTER (WHERE deleted_at IS NULL) AS active,
-                   count(*) FILTER (WHERE deleted_at IS NOT NULL) AS deleted
-            FROM posts p JOIN posting_windows w ON w.id = p.posting_window_id
-            WHERE p.author_id = %(user_id)s AND w.local_date = %(local_date)s
-            """,
-            {"user_id": user_id, "local_date": window["local_date"]},
-        )
         if counts is None:
             raise NoRowsError
         posted_at = now()
