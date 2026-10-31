@@ -39,6 +39,7 @@ webapp/
   - `postgresql.conf` の配置と `systemctl restart postgresql`（DB 1台）
 - サーバに `rsync` がある（3.2.7 で確認済み）
 - サーバに `/home/isucon/local/uv/uv` がある（0.13.5 で確認済み）
+- アプリ3台から GitHub のリリースへ HTTPS で取得できる（playbook が alp v1.0.21 を導入する）
 - ローカルの main が origin/main と一致し、`webapp/` と `etc/` に未コミット変更が無い
 
 ## 3. 初回セットアップ（このPCのみ）
@@ -134,6 +135,7 @@ DB 設定を先に反映し、そのあとアプリを再起動する（DB 再�
 | 8 | 版の記録 | `/home/isucon/webapp/DEPLOYED_COMMIT` に SHA を書き込む |
 | 9 | 再起動 | `systemctl restart isureal-python` → `systemctl restart nginx`（`become`） |
 | 10 | 検証 | `is-active`（アプリ・nginx）/ `127.0.0.1:8080` の応答 / `DEPLOYED_COMMIT` の一致 / `journalctl` に `Traceback` が無い |
+| 11 | alp の導入 | `alp` v1.0.21 を `/usr/local/bin/alp` に配置（同じ版が入っていれば skip） |
 
 ### 送らないもの（意図的）
 
@@ -185,6 +187,8 @@ main を配るだけなので、戻す操作もデプロイと同じ1コマン�
 ## 9. 注意事項
 
 - **ベンチマーク実行中にデプロイしない**（`isureal-python` の再起動で SSE と接続が切れる）
+- alp は**アプリ3台にだけ**入れる（asia2 は DB 専用で nginx のログが無い）。
+  デプロイのたびに `alp --version` を確認し、`1.0.21` と同じならダウンロードしない
 - **再起動は毎回走る**。`postgresql` の再起動でアプリの DB 接続は一度切れるため、
   必ず DB → アプリの順で実行する（playbook 側で固定済み）
 - `--limit` を使うときは `localhost` も含める（例: `--limit 'asia1,localhost'`）。
@@ -214,3 +218,4 @@ main を配るだけなので、戻す操作もデプロイと同じ1コマン�
 | `アプリが応答するか確認` で failed | `systemctl status isureal-python`、`.venv` が消えていないか確認 |
 | `journalctl` の確認で failed | アプリが例外で落ちている。`journalctl -u isureal-python -n 100` を読む |
 | `接続を受け付けているか確認` で failed | asia2 で `systemctl status postgresql` と `/var/log/postgresql/postgresql-16-main.log` を見る |
+| `alp のアーカイブをダウンロード` で failed | サーバから GitHub へ HTTPS で出られるか確認（`ssh isucon@<ip> curl -I https://github.com`） |
