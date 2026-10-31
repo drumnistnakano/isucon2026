@@ -1,0 +1,67 @@
+# PostgreSQL クエリ集計 (2026-10-31 08:19:54 〜 2026-10-31 08:21:48 UTC)
+
+## 種類別 (extended protocol では parse / bind / execute が別々に記録される)
+
+kind           count     total_ms
+execute       100396     302057.0
+bind          100396      42060.4
+statement       2893       3568.9
+parse          26123       3544.5
+
+## execute / statement の合計時間 上位 25 (全 103 種類, 合計 305625.9 ms)
+
+  total_ms      %    count   mean_ms    max_ms  query
+   79053.1  25.9%      480   164.694    475.81  SELECT id, username, secret_key_hash, display_name, bio, profile_image_id, region, account_type, status FROM users WHERE status = ? AND id <> $1 AND ($2 = ? OR (username, id) > (...)) AND ( strpos(lower(normalize(username, NFC)), $4) > ? OR strpos(lower(normalize(display_name, NFC)), $4) > ? ) ORDER
+   46405.3  15.2%     4173    11.120    531.61  SELECT u.secret_key_hash, i.media_type, i.data FROM image_objects i CROSS JOIN LATERAL ( SELECT id, secret_key_hash, profile_image_id FROM users WHERE id = i.owner_user_id AND status = ? LIMIT ? ) u WHERE i.id = $1 AND ( u.profile_image_id = i.id OR EXISTS ( SELECT ? FROM posts p WHERE p.image_id = 
+   42630.7  13.9%      720    59.209    357.01  INSERT INTO image_objects (id, owner_user_id, data, media_type, created_at) VALUES (...)
+   37420.1  12.2%       68   550.296   2632.05  SELECT id, data FROM image_objects WHERE id = ANY($1)
+   25141.8   8.2%     3553     7.076    134.21  SELECT p.id, p.author_id, p.posting_window_id, p.image_id, p.caption, p.visibility, p.location_kind, p.latitude, p.longitude, p.locality, p.posted_at, w.on_time_deadline, w.ended_at AS window_ended_at , u.id AS "author.id", u.username AS "author.username", u.secret_key_hash AS "author.secret_key_has
+   14697.8   4.8%     5030     2.922     36.18  COMMIT
+   10319.5   3.4%     2140     4.822    621.01  WITH pair_lock AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtextextended(...)) ) SELECT u.id FROM users u, pair_lock WHERE u.id = ANY($2) AND u.status = ? ORDER BY u.id FOR SHARE OF u
+    9650.5   3.2%     1560     6.186     87.01  SELECT r.id, r.post_id, r.reactor_id, r.image_id, r.reaction_type, r.created_at, r.replaced_at, r.deleted_at, u.id AS "reactor.id", u.username AS "reactor.username", u.secret_key_hash AS "reactor.secret_key_hash", u.display_name AS "reactor.display_name", u.bio AS "reactor.bio", u.profile_image_id A
+    6456.5   2.1%     1901     3.396     90.58  SELECT p.id, p.author_id, p.posting_window_id, p.image_id, p.caption, p.visibility, p.location_kind, p.latitude, p.longitude, p.locality, p.posted_at, w.on_time_deadline, w.ended_at AS window_ended_at , u.id AS "author.id", u.username AS "author.username", u.secret_key_hash AS "author.secret_key_has
+    6079.6   2.0%       18   337.756   1527.64  WITH inserted AS ( INSERT INTO notifications (id, user_id, posting_window_id, created_at) SELECT gen_random_uuid()::text, u.id, $1, $2 FROM users u WHERE u.region = $3 AND u.status = ? AND EXISTS (SELECT ? FROM login_sessions s WHERE s.user_id = u.id) ) SELECT pg_notify(...)
+    4834.8   1.6%     1560     3.099     60.96  SELECT c.id, c.post_id, c.author_id, c.body, c.created_at, c.deleted_at, u.id AS "author.id", u.username AS "author.username", u.secret_key_hash AS "author.secret_key_hash", u.display_name AS "author.display_name", u.bio AS "author.bio", u.profile_image_id AS "author.profile_image_id", u.region AS "
+    4620.9   1.5%     1081     4.275    412.10  SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE
+    3086.5   1.0%     4533     0.681     95.23  WITH viewer_friends AS ( SELECT CASE WHEN user_low_id = $1 THEN user_high_id ELSE user_low_id END AS id FROM friendships WHERE user_low_id = $1 OR user_high_id = $1 ) SELECT user_low_id, user_high_id FROM friendships WHERE user_low_id IN (SELECT id FROM viewer_friends) UNION SELECT user_low_id, user
+    2552.5   0.8%      936     2.727     49.09  SELECT u.secret_key_hash, i.media_type FROM image_objects i CROSS JOIN LATERAL ( SELECT id, secret_key_hash, profile_image_id FROM users WHERE id = i.owner_user_id AND status = ? LIMIT ? ) u WHERE i.id = $1 AND ( u.profile_image_id = i.id OR EXISTS ( SELECT ? FROM posts p WHERE p.image_id = i.id AND
+    1999.9   0.7%      720     2.778     33.89  INSERT INTO posts (id, author_id, posting_window_id, image_id, caption, visibility, location_kind, latitude, longitude, locality, posted_at) VALUES (...)
+    1036.9   0.3%      105     9.875     66.23  SELECT to_char(clock_timestamp(),?), count(*) FILTER (WHERE state=?), count(*) FILTER (WHERE state=?), count(*) FILTER (WHERE state=? AND wait_event_type IS NOT NULL), coalesce(string_agg(DISTINCT wait_event_type||?||wait_event, ?) FILTER (WHERE state=? AND wait_event_type IS NOT NULL), ?), string_a
+     840.5   0.3%     4289     0.196     23.36  SELECT u.region AS user_region, n.* FROM users u LEFT JOIN LATERAL ( SELECT n.id, n.posting_window_id, w.region, n.created_at FROM notifications n JOIN posting_windows w ON w.id = n.posting_window_id WHERE n.user_id = u.id AND n.created_at > $1 AND w.ended_at IS NULL ORDER BY n.created_at, n.id LIMI
+     838.6   0.3%      190     4.414     27.59  INSERT INTO realmojis (id, post_id, reactor_id, image_id, reaction_type, created_at) VALUES ($1, $2, $3, $4, $5, clock_timestamp())
+     736.6   0.2%     4533     0.162     19.52  SELECT EXISTS( SELECT ? FROM posts p JOIN posting_windows posted ON posted.id = p.posting_window_id JOIN users viewer ON viewer.id = $1 JOIN posting_windows current ON current.region = viewer.region AND current.ended_at IS NULL AND current.local_date = posted.local_date WHERE p.author_id = $1 AND p.
+     606.5   0.2%     5013     0.121     23.39  SELECT CASE WHEN blocker_id = $1 THEN blocked_id ELSE blocker_id END AS id FROM block_relations WHERE blocker_id = $1 OR blocked_id = $1
+     584.9   0.2%      357     1.638     17.92  SELECT r.post_id, r.reactor_id AS user_id FROM realmojis r JOIN users u ON u.id = r.reactor_id AND u.status = ? WHERE r.post_id = ANY($1) AND r.replaced_at IS NULL AND r.deleted_at IS NULL UNION SELECT c.post_id, c.author_id AS user_id FROM comments c JOIN users u ON u.id = c.author_id AND u.status 
+     495.4   0.2%    13591     0.036     22.10  SELECT s.user_id, s.token_hash, u.region FROM login_sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = $1 AND s.active = true AND u.status = ?
+     489.0   0.2%     5761     0.085     32.38  SELECT user_low_id, user_high_id FROM friendships WHERE user_low_id = $1 OR user_high_id = $1
+     417.3   0.1%       80     5.217     29.47  SELECT p.id, p.author_id, p.posting_window_id, p.image_id, p.caption, p.visibility, p.location_kind, p.latitude, p.longitude, p.locality, p.posted_at, w.on_time_deadline, w.ended_at AS window_ended_at FROM posts p JOIN posting_windows w ON w.id = p.posting_window_id WHERE p.author_id = $1 AND p.dele
+     388.5   0.1%     1386     0.280     10.50  UPDATE login_sessions SET active = false, invalidated_at = clock_timestamp(), reason = ? WHERE user_id = $1 AND active = true
+
+## 呼び出し回数 上位 25
+
+   count   total_ms   mean_ms  query
+   13591      495.4     0.036  SELECT s.user_id, s.token_hash, u.region FROM login_sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = $1 AND s.active = true AND u.status = ?
+    6917      160.5     0.023  SELECT id, username, secret_key_hash, display_name, bio, profile_image_id, region, account_type, status FROM users WHERE id = $1 AND status = ?
+    5761      489.0     0.085  SELECT user_low_id, user_high_id FROM friendships WHERE user_low_id = $1 OR user_high_id = $1
+    5707       50.6     0.009  BEGIN
+    5030    14697.8     2.922  COMMIT
+    5013      606.5     0.121  SELECT CASE WHEN blocker_id = $1 THEN blocked_id ELSE blocker_id END AS id FROM block_relations WHERE blocker_id = $1 OR blocked_id = $1
+    4533      736.6     0.162  SELECT EXISTS( SELECT ? FROM posts p JOIN posting_windows posted ON posted.id = p.posting_window_id JOIN users viewer ON viewer.id = $1 JOIN posting_windows current ON current.region = viewer.region AND current.ended_at IS NULL AND current.local_date = posted.local_date WHERE p.author_id = $1 AND p.
+    4533     3086.5     0.681  WITH viewer_friends AS ( SELECT CASE WHEN user_low_id = $1 THEN user_high_id ELSE user_low_id END AS id FROM friendships WHERE user_low_id = $1 OR user_high_id = $1 ) SELECT user_low_id, user_high_id FROM friendships WHERE user_low_id IN (SELECT id FROM viewer_friends) UNION SELECT user_low_id, user
+    4289      840.5     0.196  SELECT u.region AS user_region, n.* FROM users u LEFT JOIN LATERAL ( SELECT n.id, n.posting_window_id, w.region, n.created_at FROM notifications n JOIN posting_windows w ON w.id = n.posting_window_id WHERE n.user_id = u.id AND n.created_at > $1 AND w.ended_at IS NULL ORDER BY n.created_at, n.id LIMI
+    4173    46405.3    11.120  SELECT u.secret_key_hash, i.media_type, i.data FROM image_objects i CROSS JOIN LATERAL ( SELECT id, secret_key_hash, profile_image_id FROM users WHERE id = i.owner_user_id AND status = ? LIMIT ? ) u WHERE i.id = $1 AND ( u.profile_image_id = i.id OR EXISTS ( SELECT ? FROM posts p WHERE p.image_id = 
+    3553    25141.8     7.076  SELECT p.id, p.author_id, p.posting_window_id, p.image_id, p.caption, p.visibility, p.location_kind, p.latitude, p.longitude, p.locality, p.posted_at, w.on_time_deadline, w.ended_at AS window_ended_at , u.id AS "author.id", u.username AS "author.username", u.secret_key_hash AS "author.secret_key_has
+    3338       82.6     0.025  SELECT id, requester_id, recipient_id, status, created_at, updated_at FROM friend_requests WHERE id = $1
+    2140    10319.5     4.822  WITH pair_lock AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtextextended(...)) ) SELECT u.id FROM users u, pair_lock WHERE u.id = ANY($2) AND u.status = ? ORDER BY u.id FOR SHARE OF u
+    2009      306.2     0.152  SELECT id, username, secret_key_hash, display_name, bio, profile_image_id, region, account_type, status FROM users WHERE username = $1 FOR NO KEY UPDATE
+    1969       44.5     0.023  SELECT EXISTS( SELECT ? FROM block_relations WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1) ) AS blocked
+    1901     6456.5     3.396  SELECT p.id, p.author_id, p.posting_window_id, p.image_id, p.caption, p.visibility, p.location_kind, p.latitude, p.longitude, p.locality, p.posted_at, w.on_time_deadline, w.ended_at AS window_ended_at , u.id AS "author.id", u.username AS "author.username", u.secret_key_hash AS "author.secret_key_has
+    1866       86.2     0.046  SELECT p.id, p.author_id, p.posting_window_id, p.image_id, p.caption, p.visibility, p.location_kind, p.latitude, p.longitude, p.locality, p.posted_at, w.on_time_deadline, w.ended_at AS window_ended_at FROM posts p JOIN posting_windows w ON w.id = p.posting_window_id WHERE p.id = $1 AND p.deleted_at 
+    1699      145.8     0.086  SELECT ip, banned_until FROM ip_bans WHERE banned_until > clock_timestamp()
+    1560     9650.5     6.186  SELECT r.id, r.post_id, r.reactor_id, r.image_id, r.reaction_type, r.created_at, r.replaced_at, r.deleted_at, u.id AS "reactor.id", u.username AS "reactor.username", u.secret_key_hash AS "reactor.secret_key_hash", u.display_name AS "reactor.display_name", u.bio AS "reactor.bio", u.profile_image_id A
+    1560     4834.8     3.099  SELECT c.id, c.post_id, c.author_id, c.body, c.created_at, c.deleted_at, u.id AS "author.id", u.username AS "author.username", u.secret_key_hash AS "author.secret_key_hash", u.display_name AS "author.display_name", u.bio AS "author.bio", u.profile_image_id AS "author.profile_image_id", u.region AS "
+    1386       29.0     0.021  SELECT id FROM users WHERE id = $1 AND status = ? FOR NO KEY UPDATE
+    1386      388.5     0.280  UPDATE login_sessions SET active = false, invalidated_at = clock_timestamp(), reason = ? WHERE user_id = $1 AND active = true
+    1383      205.8     0.149  INSERT INTO login_sessions (id, user_id, token_hash) VALUES (...)
+    1081     4620.9     4.275  SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE
+    1041       59.0     0.057  SELECT id FROM friend_requests WHERE status = ? AND ((requester_id = $1 AND recipient_id = $2) OR (requester_id = $2 AND recipient_id = $1))
