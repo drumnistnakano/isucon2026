@@ -122,12 +122,16 @@ async def open_posting_window(
                 "on_time_deadline": starts_at + timedelta(seconds=body.on_time_seconds),
             },
         )
+        # 通知は SSE の接続後に作られたものだけが届き、接続にはログインが必要。
+        # 初期化以降にログインしていないユーザーの行は誰にも読まれないので作らない
         await execute(
             db,
             """
             INSERT INTO notifications (id, user_id, posting_window_id, created_at)
-            SELECT gen_random_uuid()::text, id, %(window_id)s, %(starts_at)s
-            FROM users WHERE region = %(region)s AND status = 'active'
+            SELECT gen_random_uuid()::text, u.id, %(window_id)s, %(starts_at)s
+            FROM users u
+            WHERE u.region = %(region)s AND u.status = 'active'
+              AND EXISTS (SELECT 1 FROM login_sessions s WHERE s.user_id = u.id)
             """,
             {"region": body.region, "window_id": window_id, "starts_at": starts_at},
         )

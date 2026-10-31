@@ -10,13 +10,22 @@ from fastapi.responses import StreamingResponse
 from ..auth import RegionalSession
 from ..db import DB, Pool, fetch_one, fetch_value
 from ..models.session import Session
-from ..models.user import get_user
 from ..schemas import NotificationResponse
 
 router = APIRouter(prefix="/api/notifications")
 logger = logging.getLogger(__name__)
 
-POLL_INTERVAL = 0.5
+POLL_INTERVAL = 0.2
+NEXT_NOTIFICATION_QUERY = """
+SELECT u.region AS user_region, n.*
+FROM users u LEFT JOIN LATERAL (
+  SELECT n.id, n.posting_window_id, w.region, n.created_at
+  FROM notifications n JOIN posting_windows w ON w.id = n.posting_window_id
+  WHERE n.user_id = u.id AND n.created_at > %(connected_at)s AND w.ended_at IS NULL
+  ORDER BY n.created_at, n.id LIMIT 1
+) n ON true
+WHERE u.id = %(user_id)s AND u.status = 'active'
+"""
 # nginx の proxy_read_timeout（既定60秒）で切られないよう、待機中も定期的に送る
 HEARTBEAT_INTERVAL = 10.0
 
@@ -28,27 +37,26 @@ async def notification_events(
     last_heartbeat = time.monotonic()
     while True:
         try:
+            # 1往復で届け先の確認と通知の取得を済ませる
             async with pool.connection() as db:
-                user = await get_user(db, session.user_id)
-                # 退会やリージョン変更で届け先がなくなったら終わる
-                if user is None or user.region != session.region:
-                    return
                 row = await fetch_one(
                     db,
-                    """
-                    SELECT n.id, n.posting_window_id, w.region, n.created_at
-                    FROM notifications n JOIN posting_windows w ON w.id = n.posting_window_id
-                    WHERE n.user_id = %(user_id)s AND n.created_at > %(connected_at)s
-                      AND w.ended_at IS NULL
-                    ORDER BY n.created_at, n.id LIMIT 1
-                    """,
+                    NEXT_NOTIFICATION_QUERY,
                     {"user_id": session.user_id, "connected_at": connected_at},
                 )
         except Exception:
             logger.exception("failed to get notification")
             return
-        if row is not None:
-            notification = NotificationResponse(**row)
+        # 退会やリージョン変更で届け先がなくなったら終わる
+        if row is None or row["user_region"] != session.region:
+            return
+        if row["id"] is not None:
+            notification = NotificationResponse(
+                id=row["id"],
+                posting_window_id=row["posting_window_id"],
+                region=row["region"],
+                created_at=row["created_at"],
+            )
             yield b"data: " + notification.model_dump_json().encode() + b"\n\n"
             return
         now = time.monotonic()
