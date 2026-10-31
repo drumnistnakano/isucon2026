@@ -90,7 +90,14 @@ async def open_posting_window(
     if not valid_region(body.region) or local_date is None:
         raise APIError(HTTPStatus.BAD_REQUEST, "invalid_posting_window")
     async with db.transaction():
-        await execute(db, "LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE")
+        # 同じリージョンの「投稿期間を開く」処理だけを直列化する。
+        # 以前は LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE で users 全体の
+        # 書き込み（INSERT/UPDATE/DELETE）を、下の通知作成が終わるまで止めていた。
+        await execute(
+            db,
+            "SELECT pg_advisory_xact_lock(hashtext(%(key)s)::bigint)",
+            {"key": f"posting_window:{body.region}"},
+        )
         if await fetch_value(
             db,
             """
@@ -124,18 +131,23 @@ async def open_posting_window(
         )
         # 通知は SSE の接続後に作られたものだけが届き、接続にはログインが必要。
         # 初期化以降にログインしていないユーザーの行は誰にも読まれないので作らない
-        await execute(
-            db,
-            """
-            INSERT INTO notifications (id, user_id, posting_window_id, created_at)
-            SELECT gen_random_uuid()::text, u.id, %(window_id)s, %(starts_at)s
-            FROM users u
-            WHERE u.region = %(region)s AND u.status = 'active'
-              AND EXISTS (SELECT 1 FROM login_sessions s WHERE s.user_id = u.id)
-            """,
-            {"region": body.region, "window_id": window_id, "starts_at": starts_at},
-        )
         window = await get_posting_window(db, window_id)
         if window is None:
             raise NoRowsError
+
+    # 通知の作成は投稿期間の行ロックを離してから行う。
+    # ここは対象ユーザー全員ぶんの INSERT で数百msかかるため、トランザクション内に
+    # 入れたままだと、その間ずっと posting_windows の行が FOR SHARE で待たされ、
+    # 投稿（フィード検証10点の前提）が詰まる。
+    await execute(
+        db,
+        """
+        INSERT INTO notifications (id, user_id, posting_window_id, created_at)
+        SELECT gen_random_uuid()::text, u.id, %(window_id)s, %(starts_at)s
+        FROM users u
+        WHERE u.region = %(region)s AND u.status = 'active'
+          AND EXISTS (SELECT 1 FROM login_sessions s WHERE s.user_id = u.id)
+        """,
+        {"region": body.region, "window_id": window_id, "starts_at": starts_at},
+    )
     return PostingWindowResponse.of(window)
