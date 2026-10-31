@@ -11,8 +11,9 @@ import tempfile
 from pathlib import Path
 
 # ディスクを埋めないための上限。超えたら古いものから半分まで消す。
-MAX_TOTAL_BYTES = 512 * 1024 * 1024
-PRUNE_EVERY = 1000
+MAX_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
+# 整理は全ファイルを調べてイベントループを止めるので、頻度を抑える
+PRUNE_EVERY = 20000
 
 
 class ImageCache:
