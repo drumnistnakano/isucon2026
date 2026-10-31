@@ -22,6 +22,7 @@ ansible/
   ansible.cfg           # inventory の場所、forks、SSH 多重化
   inventory.ini         # サーバの IP（変わったらここを直す）
   playbooks/deploy.yml  # 同期 → 記録 → 再起動 → 検証
+  playbooks/bak.yml     # ベンチ前のログ退避・初期化と pg_stat_statements のリセット
   README.md             # このファイル
 etc/
   nginx/nginx.conf                  # アプリ3台の /etc/nginx/nginx.conf（symlink 先）
@@ -170,9 +171,36 @@ done
 - `systemctl is-active isureal-python` が3台とも `active`（playbook が自動で確認済み）
 - `systemctl is-active nginx` が3台とも `active`、`pg_isready` が asia2 で `accepting connections`（同上）
 - `df -h /` で空きがあるか（画像キャッシュ・ログが増える）
-- nginx / アプリのログをクリアしてから計測する
+- nginx / アプリのログをクリアしてから計測する（下記の `bak.yml`）
 - **暖機運転はしない**。再起動後の初回ベンチをスコアとして記録する
 - 記録項目: 日時 / IP / コミット / netdata の有無 / slow log の状態 / score / success / fail / df / メモ
+
+### ベンチ前のログ初期化
+
+```bash
+ansible-playbook playbooks/bak.yml
+```
+
+| 対象 | 内容 |
+|---|---|
+| アプリ3台 | `/var/log/nginx/access.log` を `/var/log/nginx/backup/access.log.<日時>` に退避して 0 バイトにする |
+| DB 1台 | `/var/log/postgresql/postgresql-16-main.log` を `/var/log/postgresql/backup/` に退避して 0 バイトにする |
+| DB 1台 | `pg_stat_statements_reset()` で集計をリセットする |
+| このPC | 退避したログを `logs/<日時>/<ホスト名>/` に取ってくる（`logs/` は `.gitignore` 済み） |
+
+```text
+logs/20261031_130000/
+├── asia1/access.log.20261031_130000
+├── europe1/access.log.20261031_130000
+├── america1/access.log.20261031_130000
+└── asia2/postgresql-16-main.log.20261031_130000
+```
+
+- サービスは再起動しない（nginx も PostgreSQL もログを追記モードで開いているため、truncate 後も書き込みは続く）
+- ローカルの main との一致は確認しないので、どのブランチからでも実行できる
+- ローカルに取ってこない場合は `-e bak_fetch=false`
+- `--limit` を使うときは `localhost` も含める（含めないと日時がホストごとに別になる）
+- サーバー側の退避ファイルは消さないので、溜まったら `df -h /` を見て手で消す
 
 ## 8. ロールバック
 

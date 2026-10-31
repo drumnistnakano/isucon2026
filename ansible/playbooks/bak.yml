@@ -1,0 +1,171 @@
+---
+# ベンチマーク前に、前回のログと集計を退避してから空にする（isucon-tools の bak.sh の複数台版）。
+# 退避したログは実行した PC の logs/<日時>/<ホスト名>/ にも取ってくる。
+#
+# 使い方（必ず ansible/ ディレクトリで実行する）:
+#   ansible-playbook playbooks/bak.yml
+#   ansible-playbook playbooks/bak.yml --limit 'asia1,localhost'   # 1台だけ
+#   ansible-playbook playbooks/bak.yml -e bak_fetch=false           # ローカルに取ってこない
+#
+# 対象:
+#   アプリ3台  /var/log/nginx/access.log                -> /var/log/nginx/backup/access.log.<日時>
+#   DB 1台     /var/log/postgresql/postgresql-16-main.log -> /var/log/postgresql/backup/postgresql-16-main.log.<日時>
+#              pg_stat_statements_reset()
+#
+# 退避後は truncate で 0 バイトにする。nginx も PostgreSQL も追記モードで開いているので、
+# 再起動しなくても書き込みは続く。サービスの再起動はしない。
+
+- name: 退避ファイル名の日時を決める
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: 全ホストで同じ日時を使う
+      ansible.builtin.set_fact:
+        bak_ts: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+
+
+- name: DB 1台のログと集計を初期化する
+  hosts: db
+  gather_facts: false
+
+  vars:
+    pg_log: /var/log/postgresql/postgresql-16-main.log
+    pg_db: isureal
+    fetch: "{{ bak_fetch | default(true) | bool }}"
+    local_dir: "{{ playbook_dir }}/../../logs"
+
+  tasks:
+    # --limit で localhost を外した場合はホストごとに決める
+    - name: 退避ファイル名の日時を決める
+      ansible.builtin.set_fact:
+        bak_ts: "{{ hostvars['localhost']['bak_ts'] | default(lookup('pipe', 'date +%Y%m%d_%H%M%S')) }}"
+
+    - name: 退避先のパスを決める
+      ansible.builtin.set_fact:
+        pg_bak: "{{ pg_log | dirname }}/backup/{{ pg_log | basename }}.{{ bak_ts }}"
+
+    - name: PostgreSQL のログがあるか確認
+      ansible.builtin.stat:
+        path: "{{ pg_log }}"
+      register: pg_log_stat
+      become: true
+
+    - name: 退避先ディレクトリを作成
+      ansible.builtin.file:
+        path: "{{ pg_log | dirname }}/backup"
+        state: directory
+        mode: "0755"
+      become: true
+      when: pg_log_stat.stat.exists
+
+    - name: PostgreSQL のログを退避
+      ansible.builtin.command:
+        cmd: cp -p {{ pg_log }} {{ pg_bak }}
+      become: true
+      when: pg_log_stat.stat.exists
+
+    - name: PostgreSQL のログを空にする
+      ansible.builtin.command:
+        cmd: truncate -s 0 {{ pg_log }}
+      become: true
+      when: pg_log_stat.stat.exists
+
+    - name: pg_stat_statements の集計をリセット
+      ansible.builtin.command:
+        cmd: psql -X -At -d {{ pg_db }} -c "SELECT pg_stat_statements_reset()"
+      become: true
+      become_user: postgres
+
+    # ログは postgres:adm 640 なので、サーバー側の rsync を sudo で動かして読む
+    - name: 退避したログをローカルに取ってくる
+      ansible.posix.synchronize:
+        mode: pull
+        src: "{{ pg_bak }}"
+        dest: "{{ local_dir }}/{{ bak_ts }}/{{ inventory_hostname }}/"
+        rsync_path: sudo rsync
+        rsync_opts:
+          - "--mkpath"
+          - "--no-owner"
+          - "--no-group"
+          - "--chmod=F644"
+      when:
+        - pg_log_stat.stat.exists
+        - fetch
+
+    - name: 退避先を表示
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: {{ pg_bak }}{{
+          (' -> ' ~ local_dir ~ '/' ~ bak_ts ~ '/' ~ inventory_hostname ~ '/') if fetch else '' }}
+      when: pg_log_stat.stat.exists
+
+
+- name: アプリ3台の nginx ログを初期化する
+  hosts: app
+  gather_facts: false
+
+  vars:
+    nginx_log: /var/log/nginx/access.log
+    fetch: "{{ bak_fetch | default(true) | bool }}"
+    local_dir: "{{ playbook_dir }}/../../logs"
+
+  tasks:
+    # --limit で localhost を外した場合はホストごとに決める
+    - name: 退避ファイル名の日時を決める
+      ansible.builtin.set_fact:
+        bak_ts: "{{ hostvars['localhost']['bak_ts'] | default(lookup('pipe', 'date +%Y%m%d_%H%M%S')) }}"
+
+    - name: 退避先のパスを決める
+      ansible.builtin.set_fact:
+        nginx_bak: "{{ nginx_log | dirname }}/backup/{{ nginx_log | basename }}.{{ bak_ts }}"
+
+    - name: nginx のアクセスログがあるか確認
+      ansible.builtin.stat:
+        path: "{{ nginx_log }}"
+      register: nginx_log_stat
+      become: true
+
+    - name: 退避先ディレクトリを作成
+      ansible.builtin.file:
+        path: "{{ nginx_log | dirname }}/backup"
+        state: directory
+        mode: "0755"
+      become: true
+      when: nginx_log_stat.stat.exists
+
+    - name: nginx のアクセスログを退避
+      ansible.builtin.command:
+        cmd: cp -p {{ nginx_log }} {{ nginx_bak }}
+      become: true
+      when: nginx_log_stat.stat.exists
+
+    - name: nginx のアクセスログを空にする
+      ansible.builtin.command:
+        cmd: truncate -s 0 {{ nginx_log }}
+      become: true
+      when: nginx_log_stat.stat.exists
+
+    # ログは www-data:adm 640 なので、サーバー側の rsync を sudo で動かして読む
+    - name: 退避したログをローカルに取ってくる
+      ansible.posix.synchronize:
+        mode: pull
+        src: "{{ nginx_bak }}"
+        dest: "{{ local_dir }}/{{ bak_ts }}/{{ inventory_hostname }}/"
+        rsync_path: sudo rsync
+        rsync_opts:
+          - "--mkpath"
+          - "--no-owner"
+          - "--no-group"
+          - "--chmod=F644"
+      when:
+        - nginx_log_stat.stat.exists
+        - fetch
+
+    - name: 退避先を表示
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: {{ nginx_bak }}{{
+          (' -> ' ~ local_dir ~ '/' ~ bak_ts ~ '/' ~ inventory_hostname ~ '/') if fetch else '' }}
+      when: nginx_log_stat.stat.exists
