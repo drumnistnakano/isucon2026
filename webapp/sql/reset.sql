@@ -1,5 +1,7 @@
 SET session_replication_role = replica;
 
+CREATE INDEX IF NOT EXISTS friendships_user_high_id ON friendships(user_high_id);
+
 BEGIN;
 
 TRUNCATE ip_bans, login_sessions, administrator_sessions, friendships, friend_requests, follows, block_relations;
