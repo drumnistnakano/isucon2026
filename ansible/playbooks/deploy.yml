@@ -109,6 +109,17 @@
       become: true
       when: not dry_run
 
+    - name: postgresql.conf の所有者を root にする
+      # pg_ctlcluster は symlink 先を stat し、所有者が postgres でも root でもないと
+      # 起動を拒否する（rsync は isucon で走るため配布直後は isucon 所有になる）
+      ansible.builtin.file:
+        path: "{{ remote_etc }}/postgresql/16/main/postgresql.conf"
+        owner: root
+        group: root
+        mode: "0644"
+      become: true
+      when: not dry_run
+
     - name: PostgreSQL を再起動
       ansible.builtin.systemd:
         name: postgresql
