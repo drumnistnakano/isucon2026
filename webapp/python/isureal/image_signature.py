@@ -2,10 +2,14 @@ import base64
 import hashlib
 import hmac
 import time
+from functools import lru_cache
 from urllib.parse import quote, urlencode
 
 IMAGE_URL_LIFETIME = 24 * 60 * 60
 IMAGE_SIGNATURE_ITERATIONS = 1000
+# 期限を揃えて、ワーカーやサーバーが違っても同じ署名を再利用できるようにする
+IMAGE_URL_EXP_STEP = 60 * 60
+IMAGE_SIGNATURE_CACHE_SIZE = 65536
 
 
 def image_signing_key(secret_key_hash: str) -> bytes:
@@ -18,6 +22,7 @@ def image_signing_key(secret_key_hash: str) -> bytes:
     return key
 
 
+@lru_cache(maxsize=IMAGE_SIGNATURE_CACHE_SIZE)
 def image_signature(key: bytes, image_id: str, exp: int) -> bytes:
     value = f"{exp}:{image_id}".encode()
     for _ in range(IMAGE_SIGNATURE_ITERATIONS):
@@ -30,7 +35,8 @@ def encode_signature(signature: bytes) -> str:
 
 
 def signed_image_url(key: bytes, image_id: str) -> str:
-    exp = int(time.time()) + IMAGE_URL_LIFETIME
+    expires_at = int(time.time()) + IMAGE_URL_LIFETIME
+    exp = expires_at // IMAGE_URL_EXP_STEP * IMAGE_URL_EXP_STEP
     query = urlencode(
         {"exp": exp, "sig": encode_signature(image_signature(key, image_id, exp))}
     )
