@@ -1,0 +1,61 @@
+---
+# 全サーバ（アプリ3台 + DB 1台）から netdata を取り除く（netdata.yml の逆）。
+#
+# 使い方（必ず ansible/ ディレクトリで実行する）:
+#   ansible-playbook playbooks/netdata-uninstall.yml                   # 4台すべて
+#   ansible-playbook playbooks/netdata-uninstall.yml --limit asia2     # 1台だけ
+#
+# 取り除くもの:
+#   - netdata 本体とプラグイン（apt purge netdata*。設定・データごと消える）
+#   - apt リポジトリ設定と鍵（netdata-repo-edge）
+#   - /var/cache/netdata /var/lib/netdata /var/log/netdata /etc/netdata の残り
+#
+# 何度実行してもよい（入っていなければ何もしない）。
+# 再度入れるときは netdata.yml を使う。
+
+- name: 全サーバから netdata を取り除く
+  hosts: all
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: netdata 関連のサービスを止めて自動起動をやめる
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: false
+        state: stopped
+      loop:
+        - netdata-updater.timer
+        - netdata
+        - systemd-journald@netdata.service
+      failed_when: false
+
+    - name: netdata のパッケージを設定ごと削除
+      ansible.builtin.shell:
+        cmd: apt-get purge -y 'netdata*' && apt-get autoremove -y
+      register: nd_purge
+      changed_when: "'The following packages will be REMOVED' in nd_purge.stdout"
+
+    - name: 残ったディレクトリを削除
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/cache/netdata
+        - /var/lib/netdata
+        - /var/log/netdata
+        - /etc/netdata
+
+    - name: パッケージが残っていないか確認
+      ansible.builtin.shell:
+        cmd: dpkg -l 'netdata*' 2>/dev/null | grep -c '^[ihr]' || true
+      register: nd_left
+      changed_when: false
+      failed_when: nd_left.stdout | trim != "0"
+
+    - name: 19999 で待ち受けていないか確認
+      ansible.builtin.command:
+        cmd: ss -ltn
+      register: nd_listen
+      changed_when: false
+      failed_when: "':19999' in nd_listen.stdout"
