@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Query, Response
 
 from ..auth import RegionalSession
 from ..binding import RequestBody, cursor_time, json_body
-from ..db import DB, execute, fetch_all, fetch_value, from_row
+from ..db import DB, execute, fetch_all, fetch_one, fetch_value, from_row
 from ..errors import APIError, NoRowsError
 from ..models.relationship import (
     BLOCKED_PAIR_CONDITION,
@@ -223,12 +223,16 @@ async def get_relationships(
 @router.delete("/friendships/{user_id}", status_code=HTTPStatus.NO_CONTENT)
 async def delete_friendship(db: DB, session: RegionalSession, user_id: str) -> Response:
     actor = session.user_id
-    async with relationship_transaction(db, actor, user_id):
+    async with relationship_transaction(db, actor, user_id, pipeline=True):
         low, high = sorted((actor, user_id))
-        if not await execute(
-            db,
-            "DELETE FROM friendships WHERE user_low_id = %(low)s AND user_high_id = %(high)s",
-            {"low": low, "high": high},
+        # pipeline 中は execute() の変更行数が使えないので RETURNING で判定する
+        if (
+            await fetch_one(
+                db,
+                "DELETE FROM friendships WHERE user_low_id = %(low)s AND user_high_id = %(high)s RETURNING id",
+                {"low": low, "high": high},
+            )
+            is None
         ):
             raise relationship_conflict()
     return no_content()
@@ -237,20 +241,24 @@ async def delete_friendship(db: DB, session: RegionalSession, user_id: str) -> R
 @router.put("/follows/{user_id}", status_code=HTTPStatus.NO_CONTENT)
 async def follow(db: DB, session: RegionalSession, user_id: str) -> Response:
     actor = session.user_id
-    async with relationship_transaction(db, actor, user_id):
+    async with relationship_transaction(db, actor, user_id, pipeline=True):
         # 2 人をロックしている間の往復を減らすため、確認と INSERT を 1 文にする。
         # 相手は relationship_transaction で active を確認済み。
         # 公認でない・ブロックがある・フォロー済みのときは 1 行も入らない
-        if not await execute(
-            db,
-            f"""
-            INSERT INTO follows (id, follower_id, followee_id)
-            SELECT %(id)s, %(actor)s::varchar, u.id FROM users u
-            WHERE u.id = %(target)s AND u.account_type = 'certified_public'
-              AND NOT {BLOCKED_PAIR_CONDITION}
-            ON CONFLICT (follower_id, followee_id) DO NOTHING
-            """,
-            {"id": str(uuid.uuid4()), "actor": actor, "target": user_id},
+        if (
+            await fetch_one(
+                db,
+                f"""
+                INSERT INTO follows (id, follower_id, followee_id)
+                SELECT %(id)s, %(actor)s::varchar, u.id FROM users u
+                WHERE u.id = %(target)s AND u.account_type = 'certified_public'
+                  AND NOT {BLOCKED_PAIR_CONDITION}
+                ON CONFLICT (follower_id, followee_id) DO NOTHING
+                RETURNING id
+                """,
+                {"id": str(uuid.uuid4()), "actor": actor, "target": user_id},
+            )
+            is None
         ):
             raise relationship_conflict()
     return no_content()
@@ -259,11 +267,14 @@ async def follow(db: DB, session: RegionalSession, user_id: str) -> Response:
 @router.delete("/follows/{user_id}", status_code=HTTPStatus.NO_CONTENT)
 async def unfollow(db: DB, session: RegionalSession, user_id: str) -> Response:
     actor = session.user_id
-    async with relationship_transaction(db, actor, user_id):
-        if not await execute(
-            db,
-            "DELETE FROM follows WHERE follower_id = %(actor)s AND followee_id = %(target)s",
-            {"actor": actor, "target": user_id},
+    async with relationship_transaction(db, actor, user_id, pipeline=True):
+        if (
+            await fetch_one(
+                db,
+                "DELETE FROM follows WHERE follower_id = %(actor)s AND followee_id = %(target)s RETURNING id",
+                {"actor": actor, "target": user_id},
+            )
+            is None
         ):
             raise relationship_conflict()
     return no_content()
@@ -274,7 +285,7 @@ async def block(db: DB, session: RegionalSession, user_id: str) -> Response:
     actor = session.user_id
     params = {"actor": actor, "target": user_id}
     low, high = sorted((actor, user_id))
-    async with relationship_transaction(db, actor, user_id):
+    async with relationship_transaction(db, actor, user_id, pipeline=True):
         # 2 人をロックしている間の往復を減らすため、ブロックと関係の解消を 1 文で行う。
         # ブロック済みなら inserted が空になり、ほかの変更も行わない
         blocked = await fetch_value(
@@ -313,11 +324,14 @@ async def block(db: DB, session: RegionalSession, user_id: str) -> Response:
 @router.delete("/blocks/{user_id}", status_code=HTTPStatus.NO_CONTENT)
 async def unblock(db: DB, session: RegionalSession, user_id: str) -> Response:
     actor = session.user_id
-    async with relationship_transaction(db, actor, user_id):
-        if not await execute(
-            db,
-            "DELETE FROM block_relations WHERE blocker_id = %(actor)s AND blocked_id = %(target)s",
-            {"actor": actor, "target": user_id},
+    async with relationship_transaction(db, actor, user_id, pipeline=True):
+        if (
+            await fetch_one(
+                db,
+                "DELETE FROM block_relations WHERE blocker_id = %(actor)s AND blocked_id = %(target)s RETURNING id",
+                {"actor": actor, "target": user_id},
+            )
+            is None
         ):
             raise relationship_action_forbidden()
     return no_content()
